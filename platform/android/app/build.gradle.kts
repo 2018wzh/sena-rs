@@ -42,6 +42,9 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Sign release builds with the debug key so a plain `assembleRelease`
+            // yields an installable APK without shipping a private keystore.
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
