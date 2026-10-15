@@ -72,6 +72,7 @@ public final class SenaGameActivity extends AppCompatActivity
 
     private String gameRoot;
     private String nlsValue = NlsOption.SHIFT_JIS.value;
+    private String langValue = LangOption.DEFAULT.value;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -90,6 +91,7 @@ public final class SenaGameActivity extends AppCompatActivity
         }
         gameRoot = p.gameRoot;
         nlsValue = p.nls;
+        langValue = p.lang;
 
         surfaceView.getHolder().addCallback(this);
         surfaceView.setOnTouchListener(this);
@@ -180,7 +182,7 @@ public final class SenaGameActivity extends AppCompatActivity
             h = Math.max(1, surfaceView.getHeight());
         }
 
-        long hnd = NativeSena.create(holder.getSurface(), w, h, scale, gameRoot, nlsValue);
+        long hnd = NativeSena.create(holder.getSurface(), w, h, scale, gameRoot, nlsValue, langValue);
         if (hnd == 0) {
             Toast.makeText(this, "Failed to create engine", Toast.LENGTH_LONG).show();
             finish();
@@ -370,10 +372,12 @@ public final class SenaGameActivity extends AppCompatActivity
     private static final class LaunchParams {
         final String gameRoot;
         final String nls;
+        final String lang;
 
-        LaunchParams(String gameRoot, String nls) {
+        LaunchParams(String gameRoot, String nls, String lang) {
             this.gameRoot = gameRoot;
             this.nls = NlsOption.fromValue(nls).value;
+            this.lang = LangOption.fromValue(lang).value;
         }
     }
 
@@ -404,7 +408,8 @@ public final class SenaGameActivity extends AppCompatActivity
                 return null;
             }
             String nls = o.optString("nls_utf8", NlsOption.SHIFT_JIS.value);
-            return new LaunchParams(root, nls);
+            String lang = o.optString("lang_utf8", LangOption.DEFAULT.value);
+            return new LaunchParams(root, nls, lang);
         } catch (Throwable t) {
             return null;
         }

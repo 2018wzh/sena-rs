@@ -15,6 +15,7 @@ use std::time::Duration;
 use pal_asset::Nls;
 
 use crate::app::build_engine;
+use crate::config::TextLang;
 use crate::engine::Engine;
 use crate::event::{InputEvent, MouseButton, PalEvent};
 use crate::runtime::RuntimeStatus;
@@ -65,6 +66,14 @@ fn nls_from_cstr(ptr: *const c_char) -> Nls {
         .filter(|s| !s.trim().is_empty())
         .and_then(|s| Nls::from_str(s).ok())
         .unwrap_or_default()
+}
+
+fn lang_from_cstr(ptr: *const c_char) -> TextLang {
+    unsafe { string_from_cstr(ptr) }
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| TextLang::from_str(s).ok())
+        .unwrap_or(TextLang::Jp)
 }
 
 fn runtime_status_is_terminal(status: &RuntimeStatus) -> bool {
@@ -175,7 +184,7 @@ pub unsafe extern "C" fn sena_game_cover_mime_from_dir(
 /// Runs the desktop Sena engine with `game_root_utf8` as the game directory.
 #[no_mangle]
 pub unsafe extern "C" fn sena_run_entry(game_root_utf8: *const c_char) -> i32 {
-    sena_run_entry_nls(game_root_utf8, ptr::null())
+    sena_run_entry_nls(game_root_utf8, ptr::null(), ptr::null())
 }
 
 /// Runs the desktop Sena engine with an explicit text/resource encoding.
@@ -183,6 +192,7 @@ pub unsafe extern "C" fn sena_run_entry(game_root_utf8: *const c_char) -> i32 {
 pub unsafe extern "C" fn sena_run_entry_nls(
     game_root_utf8: *const c_char,
     nls_utf8: *const c_char,
+    lang_utf8: *const c_char,
 ) -> i32 {
     let game_root = match path_from_cstr(game_root_utf8) {
         Ok(path) => path,
@@ -195,6 +205,7 @@ pub unsafe extern "C" fn sena_run_entry_nls(
     match crate::run_sena(crate::SenaConfig {
         game_root: Some(game_root),
         nls: nls_from_cstr(nls_utf8),
+        lang: lang_from_cstr(lang_utf8),
         ..Default::default()
     }) {
         Ok(()) => 0,
@@ -210,6 +221,7 @@ pub unsafe extern "C" fn sena_run_entry_nls(
 pub unsafe extern "C" fn sena_host_create(
     game_root_utf8: *const c_char,
     nls_utf8: *const c_char,
+    lang_utf8: *const c_char,
     width: u32,
     height: u32,
 ) -> *mut c_void {
@@ -223,6 +235,7 @@ pub unsafe extern "C" fn sena_host_create(
     let mut config = crate::SenaConfig {
         game_root: Some(game_root),
         nls: nls_from_cstr(nls_utf8),
+        lang: lang_from_cstr(lang_utf8),
         width: width.max(1),
         height: height.max(1),
         prefer_config_window_size: true,
@@ -381,8 +394,15 @@ pub unsafe extern "C" fn sena_android_create(
     _native_scale_factor: f64,
     game_dir_utf8: *const c_char,
     nls_utf8: *const c_char,
+    lang_utf8: *const c_char,
 ) -> *mut c_void {
-    sena_host_create(game_dir_utf8, nls_utf8, surface_width_px, surface_height_px)
+    sena_host_create(
+        game_dir_utf8,
+        nls_utf8,
+        lang_utf8,
+        surface_width_px,
+        surface_height_px,
+    )
 }
 
 #[no_mangle]
@@ -463,8 +483,15 @@ pub unsafe extern "C" fn sena_ios_create(
     _native_scale_factor: f64,
     game_root_utf8: *const c_char,
     nls_utf8: *const c_char,
+    lang_utf8: *const c_char,
 ) -> *mut c_void {
-    sena_host_create(game_root_utf8, nls_utf8, surface_width, surface_height)
+    sena_host_create(
+        game_root_utf8,
+        nls_utf8,
+        lang_utf8,
+        surface_width,
+        surface_height,
+    )
 }
 
 #[no_mangle]
@@ -565,15 +592,16 @@ pub struct SenaPumpHandle {
 
 #[no_mangle]
 pub unsafe extern "C" fn sena_pump_create(game_root_utf8: *const c_char) -> *mut SenaPumpHandle {
-    sena_pump_create_nls(game_root_utf8, ptr::null())
+    sena_pump_create_nls(game_root_utf8, ptr::null(), ptr::null())
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn sena_pump_create_nls(
     game_root_utf8: *const c_char,
     nls_utf8: *const c_char,
+    lang_utf8: *const c_char,
 ) -> *mut SenaPumpHandle {
-    sena_host_create(game_root_utf8, nls_utf8, 1280, 720) as *mut SenaPumpHandle
+    sena_host_create(game_root_utf8, nls_utf8, lang_utf8, 1280, 720) as *mut SenaPumpHandle
 }
 
 #[no_mangle]

@@ -26,6 +26,7 @@ char *sena_game_cover_mime_from_dir(const char *game_root_utf8);
 void *sena_host_create(
     const char *game_root_utf8,
     const char *nls_utf8,
+    const char *lang_utf8,
     uint32_t width,
     uint32_t height);
 int32_t sena_host_step(void *handle, uint32_t dt_ms);
@@ -45,7 +46,8 @@ void *sena_ios_create(
     uint32_t surface_height,
     double native_scale_factor,
     const char *game_root_utf8,
-    const char *nls_utf8);
+    const char *nls_utf8,
+    const char *lang_utf8);
 void sena_ios_resize_viewport(
     void *handle,
     uint32_t surface_width,
@@ -78,7 +80,8 @@ void *sena_android_create(
     uint32_t surface_height_px,
     double native_scale_factor,
     const char *game_dir_utf8,
-    const char *nls_utf8);
+    const char *nls_utf8,
+    const char *lang_utf8);
 void sena_android_set_native_messagebox_callback(
     void *handle,
     sena_native_messagebox_callback_t callback,
@@ -98,7 +101,7 @@ void sena_android_destroy(void *handle);
 #if defined(__APPLE__) && TARGET_OS_MAC && !TARGET_OS_IPHONE
 typedef struct SenaPumpHandle SenaPumpHandle;
 SenaPumpHandle *sena_pump_create(const char *game_root_utf8);
-SenaPumpHandle *sena_pump_create_nls(const char *game_root_utf8, const char *nls_utf8);
+SenaPumpHandle *sena_pump_create_nls(const char *game_root_utf8, const char *nls_utf8, const char *lang_utf8);
 void sena_pump_set_native_messagebox_callback(
     SenaPumpHandle *handle,
     sena_native_messagebox_callback_t callback,
@@ -107,7 +110,7 @@ void sena_pump_submit_messagebox_result(SenaPumpHandle *handle, uint64_t request
 int32_t sena_pump_step(SenaPumpHandle *handle, uint32_t timeout_ms);
 void sena_pump_destroy(SenaPumpHandle *handle);
 int32_t sena_run_entry(const char *game_root_utf8);
-int32_t sena_run_entry_nls(const char *game_root_utf8, const char *nls_utf8);
+int32_t sena_run_entry_nls(const char *game_root_utf8, const char *nls_utf8, const char *lang_utf8);
 #endif
 
 #ifdef __cplusplus

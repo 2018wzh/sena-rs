@@ -31,7 +31,7 @@ typealias SenaMessageboxCallback = @convention(c) (
 ) -> Void
 
 @_silgen_name("sena_run_entry_nls")
-private func sena_run_entry_nls(_ gameRootUtf8: UnsafePointer<CChar>, _ nlsUtf8: UnsafePointer<CChar>) -> Int32
+private func sena_run_entry_nls(_ gameRootUtf8: UnsafePointer<CChar>, _ nlsUtf8: UnsafePointer<CChar>, _ langUtf8: UnsafePointer<CChar>?) -> Int32
 
 @_silgen_name("sena_pump_set_native_messagebox_callback")
 private func sena_pump_set_native_messagebox_callback(
@@ -221,7 +221,7 @@ final class LauncherHost {
     func runGame(_ game: GameEntry) -> Int32 {
         return game.rootPath.withCString { gameC in
             game.nls.withCString { nlsC in
-                sena_run_entry_nls(gameC, nlsC)
+                sena_run_entry_nls(gameC, nlsC, nil)
             }
         }
     }

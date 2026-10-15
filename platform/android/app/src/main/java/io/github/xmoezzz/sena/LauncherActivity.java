@@ -33,6 +33,7 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
     private GameLibrary library;
     private GameAdapter adapter;
     private Spinner nlsSpinner;
+    private Spinner langSpinner;
 
     private final ActivityResultLauncher<Uri> openTreeLauncher =
             registerForActivityResult(new ActivityResultContracts.OpenDocumentTree(), this::onImportTreeSelected);
@@ -58,6 +59,12 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
         nlsAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         nlsSpinner.setAdapter(nlsAdapter);
         nlsSpinner.setSelection(0);
+
+        langSpinner = findViewById(R.id.spinner_lang);
+        ArrayAdapter<String> langAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, LangOption.labels());
+        langAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        langSpinner.setAdapter(langAdapter);
+        langSpinner.setSelection(LangOption.indexOfValue(LangOption.DEFAULT.value));
 
         refresh();
     }
@@ -126,7 +133,7 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
 
         new Thread(() -> {
             try {
-                GameLibrary.ImportedGameDraft draft = library.importFromTreeUri(treeUri, selectedNlsValue());
+                GameLibrary.ImportedGameDraft draft = library.importFromTreeUri(treeUri, selectedNlsValue(), selectedLangValue());
                 runOnUiThread(() -> addImportedGame(draft));
             } catch (Throwable t) {
                 library.cleanupPartialImport();
@@ -151,7 +158,7 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
     public void onGameClicked(GameEntry e) {
         try {
             // Write launch config that native code can read on startup.
-            LaunchConfig.write(this, e.rootPath, e.nls);
+            LaunchConfig.write(this, e.rootPath, e.nls, e.lang);
 
             Intent it = new Intent(this, SenaGameActivity.class);
             startActivity(it);
@@ -164,12 +171,25 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
     public void onGameLongPressed(GameEntry e) {
         if (e == null) return;
 
+        final LangOption[] langs = LangOption.values();
+        String[] items = new String[3 + langs.length + 1];
+        items[0] = "Use ShiftJIS";
+        items[1] = "Use GBK";
+        items[2] = "Use UTF-8";
+        for (int i = 0; i < langs.length; i++) {
+            items[3 + i] = "Language: " + langs[i].label;
+        }
+        items[3 + langs.length] = "Remove";
+
         new AlertDialog.Builder(this)
                 .setTitle(e.title)
-                .setItems(new String[] { "Use ShiftJIS", "Use GBK", "Use UTF-8", "Remove" }, (d, which) -> {
+                .setItems(items, (d, which) -> {
                     try {
                         if (which >= 0 && which < 3) {
                             library.updateNls(e, NlsOption.values()[which].value);
+                            refresh();
+                        } else if (which >= 3 && which < 3 + langs.length) {
+                            library.updateLang(e, langs[which - 3].value);
                             refresh();
                         } else {
                             Toast.makeText(this, "Use the launcher list controls to remove games.", Toast.LENGTH_SHORT).show();
@@ -185,6 +205,13 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
     private String selectedNlsValue() {
         int pos = nlsSpinner != null ? nlsSpinner.getSelectedItemPosition() : 0;
         NlsOption[] options = NlsOption.values();
+        if (pos < 0 || pos >= options.length) pos = 0;
+        return options[pos].value;
+    }
+
+    private String selectedLangValue() {
+        int pos = langSpinner != null ? langSpinner.getSelectedItemPosition() : 0;
+        LangOption[] options = LangOption.values();
         if (pos < 0 || pos >= options.length) pos = 0;
         return options[pos].value;
     }
