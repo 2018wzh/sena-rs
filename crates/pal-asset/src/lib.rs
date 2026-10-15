@@ -1,7 +1,9 @@
 //! Asset loading support for the reversed PAL engine.
 //!
-//! This crate intentionally handles the original single-language PAL search path only.
-//! It does not implement the CN/TC path lists from `archive_cn.dat` and `archive_tc.dat`.
+//! The base search path comes from `archive.dat`. [`ResourceManager::bootstrap_with_language`]
+//! additionally applies the `archive_cn.dat` / `archive_tc.dat` path lists that the localized
+//! FHD releases ship, so their `system_cn` / `etc_cn` / `movie_cn` / `update_cn` archives are
+//! searched ahead of the base ones.
 //! External asset names are accepted as UTF-8 strings. The selected [`Nls`] controls how
 //! those names are encoded into the original byte-level PAL lookup keys.
 

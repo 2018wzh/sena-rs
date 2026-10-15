@@ -104,6 +104,23 @@ impl PalFontSystem {
         Ok(())
     }
 
+    /// Replace the fallback face with caller-supplied TrueType bytes.
+    ///
+    /// Releases that deliver their CJK faces as loose files (`fonts/*.ttf`)
+    /// instead of extending `DEFAULT_FONT.DAT` need a host-provided face for
+    /// the glyphs the PAL bitmap font and the embedded `default.ttf` do not
+    /// cover. Returns whether the bytes parsed; on failure the previous
+    /// fallback is kept.
+    pub fn load_external_font(&mut self, bytes: Vec<u8>) -> bool {
+        match PalFontFallback::from_ttf_bytes(bytes) {
+            Some(fallback) => {
+                self.fallback = fallback;
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn measure(&self, text: &str) -> (u32, u32) {
         let font_size = f32::from(self.font_size.max(1));
         if self.font_type == 4 {
@@ -390,6 +407,15 @@ impl PalFontFallback {
         let font = FontRef::try_from_slice(DEFAULT_TTF_BYTES)
             .expect("default.ttf embedded in pal-vm is not a valid TrueType font");
         Self { font }
+    }
+
+    /// Build a fallback from caller-supplied TrueType bytes.
+    ///
+    /// Returns `None` when the face cannot be parsed. The bytes are leaked so
+    /// the `FontRef` borrow can be `'static`, matching `default_ttf`.
+    pub fn from_ttf_bytes(bytes: Vec<u8>) -> Option<Self> {
+        let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+        FontRef::try_from_slice(leaked).ok().map(|font| Self { font })
     }
 
     /// Measure the pixel width of a single text line at the given pixel height.

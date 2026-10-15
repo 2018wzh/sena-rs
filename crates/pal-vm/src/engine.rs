@@ -5,7 +5,7 @@ use pal_asset::{Nls, ResourceManager};
 
 use crate::assets::CoreAssets;
 use crate::audio::{AudioConfig, AudioHandle, AudioSystem, PalSoundGroup};
-use crate::config::{ini_graphics_size, EngineStartupConfig};
+use crate::config::{ini_graphics_size, parse_ini_nls, EngineStartupConfig, TextLang};
 use crate::debug::{collect_frame_dump, pal_debug_enabled, pal_debug_frame_enabled, print_dump};
 use crate::event::PalEvent;
 use crate::input::PalInputState;
@@ -36,6 +36,11 @@ pub struct TraceConfig {
 pub struct EngineConfig {
     pub game_root: Option<PathBuf>,
     pub nls: Nls,
+    /// Which field of a multi-language text record the engine displays.
+    pub lang: TextLang,
+    /// TrueType face used as the text fallback instead of the auto-discovered
+    /// `fonts/*.ttf` of the game root.
+    pub font_file: Option<PathBuf>,
     pub script_runtime: ScriptRuntimeConfig,
     pub audio: AudioConfig,
     pub trace: TraceConfig,
@@ -46,6 +51,8 @@ impl Default for EngineConfig {
         Self {
             game_root: None,
             nls: Nls::ShiftJis,
+            lang: TextLang::Jp,
+            font_file: None,
             script_runtime: ScriptRuntimeConfig::default(),
             audio: AudioConfig::default(),
             trace: TraceConfig::default(),
@@ -76,8 +83,35 @@ impl Engine {
         let (startup_config, resource_manager, core_assets, runtime, last_runtime_status) =
             match &config.game_root {
                 Some(root) => {
-                    let startup_config = EngineStartupConfig::load(root, config.nls)?;
-                    let mut resource_manager = ResourceManager::bootstrap(root, config.nls)?;
+                    let mut startup_config = EngineStartupConfig::load(root, config.nls)?;
+                    let mut resource_manager = ResourceManager::bootstrap_with_language(
+                        root,
+                        config.nls,
+                        config.lang.archive_list(),
+                    )?;
+                    // Releases that keep the whole PAL payload inside data.pac
+                    // ship no loose SYSTEM.INI, so the logical size, font type
+                    // and font names come from the archived copy. The loose
+                    // file stays authoritative, and a missing one is still
+                    // non-fatal.
+                    if startup_config.system_ini.is_none() {
+                        match resource_manager.open("SYSTEM.INI") {
+                            Ok(asset) => match parse_ini_nls(&asset.bytes, config.nls) {
+                                Ok(ini) => {
+                                    log::debug!(
+                                        "[trace-assets] SYSTEM.INI loaded from the PAL archive"
+                                    );
+                                    startup_config.system_ini = Some(ini);
+                                }
+                                Err(err) => log::warn!(
+                                    "[trace-assets] archived SYSTEM.INI parse failed: {err}"
+                                ),
+                            },
+                            Err(err) => log::debug!(
+                                "[trace-assets] no loose or archived SYSTEM.INI: {err}"
+                            ),
+                        }
+                    }
                     let core_assets = CoreAssets::load(
                         &mut resource_manager,
                         startup_config.system_dat.as_ref(),
@@ -100,10 +134,16 @@ impl Engine {
                         core_assets.script_entry_pc,
                         config.script_runtime.clone(),
                     );
+                    runtime.set_text_lang(config.lang);
                     if let Some(system_ini) = startup_config.system_ini.clone() {
                         runtime.set_system_ini(system_ini);
                     }
-                    runtime.load_configured_font(&mut resource_manager, config.nls);
+                    runtime.load_configured_font(
+                        &mut resource_manager,
+                        config.nls,
+                        Some(root),
+                        config.font_file.as_deref(),
+                    );
                     // Initialise the writable Mem.dat shadow used by MemDatDirect writes.
                     runtime.load_mem_dat(&core_assets.mem_dat.bytes);
                     runtime.load_portable_system_data(root);

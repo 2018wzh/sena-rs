@@ -40,11 +40,11 @@ pub use app::{
     DiagnosticClickWhenHitEnabled, DiagnosticKeyEvent, DiagnosticPngAt, DiagnosticWheelEvent,
     SenaConfig,
 };
-pub use assets::{CoreAssets, GraphicIndex};
+pub use assets::{CoreAssets, FileDatLayout, GraphicIndex};
 pub use audio::{AudioConfig, AudioHandle, AudioSystem, PalSoundGroup, PalSoundStatus, PalVolume};
 pub use config::{
     load_system_ini, parse_ini_nls, ConfigDat, EngineStartupConfig, IniFile, IniSection, IniValue,
-    SystemDat,
+    SystemDat, TextLang,
 };
 pub use debug::{
     collect_frame_dump, pal_debug_enabled, DrawCmdDumpEntry, FrameDebugDump, RenderDumpEntry,

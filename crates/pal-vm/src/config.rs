@@ -190,6 +190,72 @@ impl IniValue {
     }
 }
 
+/// Separator between the per-language fields of one FHD text record.
+pub const TEXT_FIELD_SEPARATOR: char = '\u{203B}';
+
+/// Which language the engine reads out of the text pool.
+///
+/// The original SoftPAL tables store exactly one NLS-encoded string per
+/// record, so they render identically for every value. The later FHD releases
+/// replaced the pool with UTF-16LE records that join one field per language
+/// with U+203B (`日文※简体※繁体`); the native engine selects a field through
+/// its `AdvCommandText0`/`AdvCommandText1`/`AdvCommandText2` variants, which
+/// this index mirrors. `Jp` is the default so an unmodified game root keeps
+/// the historical behaviour.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextLang {
+    #[default]
+    Jp,
+    Cn,
+    Tc,
+}
+
+impl TextLang {
+    /// Zero-based text-record field this language selects.
+    pub fn field_index(self) -> usize {
+        match self {
+            Self::Jp => 0,
+            Self::Cn => 1,
+            Self::Tc => 2,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Jp => "jp",
+            Self::Cn => "cn",
+            Self::Tc => "tc",
+        }
+    }
+
+    /// Per-language archive path list, shipped next to `archive.dat` by the
+    /// localized FHD releases. It names the archives carrying the translated
+    /// screens, which are searched ahead of the base archives. `None` keeps the
+    /// original single-language search path.
+    pub fn archive_list(self) -> Option<&'static str> {
+        match self {
+            Self::Jp => None,
+            Self::Cn => Some("archive_cn.dat"),
+            Self::Tc => Some("archive_tc.dat"),
+        }
+    }
+}
+
+impl std::str::FromStr for TextLang {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "jp" | "ja" | "jpn" => Ok(Self::Jp),
+            "cn" | "zh" | "zh-cn" | "sc" | "chs" => Ok(Self::Cn),
+            "tc" | "zh-tw" | "zh-hk" | "cht" => Ok(Self::Tc),
+            other => Err(format!(
+                "unknown language {other:?} (expected jp, cn or tc)"
+            )),
+        }
+    }
+}
+
 /// All sections of an INI file, keyed by lowercased section name.
 pub type IniFile = BTreeMap<String, IniSection>;
 

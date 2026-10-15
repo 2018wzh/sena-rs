@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use pal_asset::{AssetSource, LoadedAsset};
 use pal_script::PointTable;
-use pal_vm::{CoreAssets, RuntimeStatus, ScriptRuntime, ScriptRuntimeConfig};
+use pal_vm::{CoreAssets, FileDatLayout, RuntimeStatus, ScriptRuntime, ScriptRuntimeConfig};
 
 fn asset(name: &str, bytes: Vec<u8>) -> LoadedAsset {
     LoadedAsset {
@@ -47,6 +47,8 @@ fn runtime_executes_basic_variable_arithmetic() {
         mem_dat: asset("Mem.dat", Vec::new()),
         point_dat: asset("Point.dat", Vec::new()),
         graphic_dat: None,
+        text_dat_multilingual: false,
+        file_dat_layout: FileDatLayout::default(),
         extended_softpal: false,
         script_check_value: 0,
         script_entry_pc: 12,

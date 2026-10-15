@@ -13,6 +13,11 @@ pub struct CoreAssets {
     pub mem_dat: LoadedAsset,
     pub point_dat: LoadedAsset,
     pub graphic_dat: Option<LoadedAsset>,
+    /// Whether `text_dat` uses the FHD record layout: UTF-16LE strings whose
+    /// fields are joined by U+203B, one field per language.
+    pub text_dat_multilingual: bool,
+    /// Slot layout of `file_dat`.
+    pub file_dat_layout: FileDatLayout,
     pub script_check_value: u32,
     pub script_entry_pc: u32,
     /// A later SoftPAL extension set exposes the millisecond clock at 18:121
@@ -41,7 +46,9 @@ impl CoreAssets {
         }
 
         let file_dat = resource_manager.open_decrypting("File.dat")?;
+        let file_dat_layout = FileDatLayout::detect(&file_dat.bytes);
         let text_dat = resource_manager.open_decrypting("Text.dat")?;
+        let text_dat_multilingual = multilingual_text_table(&text_dat.bytes);
         let mem_dat = resource_manager.open_decrypting("Mem.dat")?;
         let point_dat = resource_manager.open_decrypting("Point.dat")?;
         let point_table = PointTable::parse(&point_dat.bytes)?;
@@ -81,6 +88,8 @@ impl CoreAssets {
             mem_dat,
             point_dat,
             graphic_dat,
+            text_dat_multilingual,
+            file_dat_layout,
             script_check_value,
             script_entry_pc,
             extended_softpal,
@@ -92,6 +101,137 @@ impl CoreAssets {
     pub fn script_image(&self) -> anyhow::Result<ScriptImage<'_>> {
         Ok(ScriptImage::parse(&self.script.bytes)?)
     }
+}
+
+/// Record count the multi-language probe validates before deciding. Enough to
+/// reject a single-byte table whose first record happens to parse, without
+/// walking a megabyte-long pool.
+const MULTILINGUAL_TEXT_PROBE_RECORDS: usize = 64;
+
+/// Slot layout of `File.dat`.
+///
+/// The header stores the slot count, which fixes the stride: the original
+/// tables use 0x20-byte slots holding NLS names, while the FHD tables widen
+/// every name to UTF-16LE and therefore use 0x40. A table that does not divide
+/// evenly keeps the historical fixed layout, so an original install behaves
+/// exactly as before.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileDatLayout {
+    /// Byte offset of the first slot.
+    pub base: usize,
+    /// Bytes per slot.
+    pub stride: usize,
+    /// Slots hold UTF-16LE names rather than NLS strings.
+    pub utf16: bool,
+}
+
+impl Default for FileDatLayout {
+    fn default() -> Self {
+        Self {
+            base: 0x10,
+            stride: 0x20,
+            utf16: false,
+        }
+    }
+}
+
+impl FileDatLayout {
+    const MAGIC: &'static [u8] = b"$FILE_LIST__";
+    /// Slots the UTF-16 probe votes over.
+    const ENCODING_PROBE_SLOTS: usize = 64;
+
+    pub fn detect(bytes: &[u8]) -> Self {
+        let fallback = Self::default();
+        if !bytes.starts_with(Self::MAGIC) {
+            return fallback;
+        }
+        let Some(header) = bytes.get(0x0C..0x10) else {
+            return fallback;
+        };
+        let count = u32::from_le_bytes(header.try_into().expect("4-byte slice")) as usize;
+        let payload = bytes.len() - 0x10;
+        if count == 0 || payload % count != 0 {
+            return fallback;
+        }
+        let stride = payload / count;
+        if stride == 0 {
+            return fallback;
+        }
+        Self {
+            stride,
+            utf16: slots_are_utf16(bytes, stride),
+            ..fallback
+        }
+    }
+}
+
+/// Majority vote over the first slots: a UTF-16LE name puts a NUL on the second
+/// byte of the slot, which a single-byte name only does for a one-character one.
+fn slots_are_utf16(bytes: &[u8], stride: usize) -> bool {
+    let mut utf16 = 0usize;
+    let mut single = 0usize;
+    let mut offset = 0x10usize;
+    while offset + stride <= bytes.len() && utf16 + single < FileDatLayout::ENCODING_PROBE_SLOTS {
+        let first = bytes[offset];
+        let second = bytes[offset + 1];
+        if first == 0 {
+            // Empty slot: no evidence either way.
+        } else if second == 0 {
+            utf16 += 1;
+        } else {
+            single += 1;
+        }
+        offset += stride;
+    }
+    utf16 > single
+}
+
+/// Does this `Text.dat` use the FHD multi-language record layout?
+///
+/// Both layouts share the `$TEXT_LIST__` header and the `[u32 id]` record
+/// prefix, so the only reliable discriminator is the record walk itself: the
+/// ids must stay consecutive and every string must terminate on a UTF-16 code
+/// unit boundary. A single-byte pool fails on its first record, because the
+/// string terminator and the next record's id are not code-unit aligned.
+fn multilingual_text_table(bytes: &[u8]) -> bool {
+    if bytes.len() < 16 || &bytes[..12] != b"$TEXT_LIST__" {
+        return false;
+    }
+    let mut probed = 0usize;
+    let mut previous_id: Option<u32> = None;
+    let mut position = 16usize;
+    while probed < MULTILINGUAL_TEXT_PROBE_RECORDS {
+        let Some(header) = bytes.get(position..position + 4) else {
+            break;
+        };
+        let id = u32::from_le_bytes(header.try_into().expect("4-byte slice"));
+        if let Some(previous) = previous_id {
+            if id != previous.wrapping_add(1) {
+                return false;
+            }
+        }
+        previous_id = Some(id);
+        position += 4;
+        let Some(terminator) = utf16_terminator(&bytes[position..]) else {
+            return false;
+        };
+        position += terminator + 2;
+        probed += 1;
+    }
+    probed >= 2
+}
+
+/// Offset of the UTF-16LE NUL code unit that ends the string at `bytes[0]`,
+/// scanning only code-unit boundaries.
+fn utf16_terminator(bytes: &[u8]) -> Option<usize> {
+    let mut position = 0usize;
+    while position + 2 <= bytes.len() {
+        if bytes[position] == 0 && bytes[position + 1] == 0 {
+            return Some(position);
+        }
+        position += 2;
+    }
+    None
 }
 
 #[derive(Debug)]

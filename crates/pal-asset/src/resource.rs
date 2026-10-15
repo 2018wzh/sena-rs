@@ -41,8 +41,29 @@ impl ResourceManager {
     }
 
     pub fn bootstrap(root: impl Into<PathBuf>, nls: Nls) -> Result<Self> {
+        Self::bootstrap_with_language(root, nls, None)
+    }
+
+    /// [`Self::bootstrap`] plus a per-language archive list.
+    ///
+    /// The FHD releases ship `archive_cn.dat` / `archive_tc.dat` next to
+    /// `archive.dat`. They name the localized archives that carry the
+    /// translated screens (`system_cn`, `etc_cn`, `movie_cn`, `update_cn`), and
+    /// those are meant to shadow the base archives. The language list is added
+    /// before the base list for that reason, and a list that does not exist is
+    /// not an error, so a single-language install behaves exactly like
+    /// [`Self::bootstrap`].
+    pub fn bootstrap_with_language(
+        root: impl Into<PathBuf>,
+        nls: Nls,
+        language_archive: Option<&str>,
+    ) -> Result<Self> {
         let mut manager = Self::new(root, nls);
         manager.add_path("data");
+
+        if let Some(list) = language_archive {
+            manager.add_archive_paths(list)?;
+        }
 
         let archive = manager.open("archive.dat")?;
         let paths = parse_archive_dat_paths(&archive.bytes, nls)?;
@@ -50,6 +71,21 @@ impl ResourceManager {
             manager.add_path(path);
         }
         Ok(manager)
+    }
+
+    /// Append every search path named by an `archive*.dat` list, which is a
+    /// `|`-separated list of base names just like `archive.dat`. Returns
+    /// `false` when the list itself is absent.
+    pub fn add_archive_paths(&mut self, list_name: &str) -> Result<bool> {
+        let list = match self.open(list_name) {
+            Ok(list) => list,
+            Err(AssetError::AssetNotFound { .. }) => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        for path in parse_archive_dat_paths(&list.bytes, self.nls)? {
+            self.add_path(path);
+        }
+        Ok(true)
     }
 
     pub fn root(&self) -> &Path {

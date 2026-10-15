@@ -10,12 +10,14 @@ use pal_script::extsig::{lookup_sig, observed_pop_count};
 use pal_script::opcodes::{ext_opcode, primary_opcode};
 use pal_script::{Operand, OperandKind, PointTable, ScriptImage};
 
-use crate::assets::CoreAssets;
+use crate::assets::{CoreAssets, FileDatLayout};
 use crate::audio::{
     audio_lookup_key, decode_game_audio, parse_bgm_csv, AudioHandle, AudioSystem, BgmLoop,
     PalSoundGroup, PalVolume,
 };
-use crate::config::{ini_graphics_size, parse_ini_nls, IniFile, IniValue};
+use crate::config::{
+    ini_graphics_size, parse_ini_nls, IniFile, IniValue, TextLang, TEXT_FIELD_SEPARATOR,
+};
 use crate::effect::PalEffectSystem;
 use crate::font::PalFontSystem;
 use crate::image::{decode_image, decode_image_with_resolver, DecodedImage};
@@ -494,6 +496,8 @@ pub struct ScriptRuntime {
     dynamic_string_cursor: usize,
     /// SYSTEM.INI parsed through the selected external NLS.
     system_ini: Option<IniFile>,
+    /// Language field read out of multi-language text records.
+    text_lang: TextLang,
     system_state: PalSystemState,
     /// PAL random seed ring used by PalRandomEx and Game category 20 random.
     random_state: PalRandomState,
@@ -1435,6 +1439,7 @@ impl ScriptRuntime {
             dynamic_strings: Vec::new(),
             dynamic_string_cursor: 0,
             system_ini: None,
+            text_lang: TextLang::default(),
             system_state: PalSystemState::new(),
             random_state: PalRandomState::default(),
             frame_events: Vec::new(),
@@ -1445,6 +1450,14 @@ impl ScriptRuntime {
             system_scratch_value: 0,
             debug_window_state: 0,
         }
+    }
+
+    /// Select which field of a multi-language text record is displayed.
+    ///
+    /// Only affects the FHD text layout; original single-language pools have
+    /// no separator and render identically for every value.
+    pub fn set_text_lang(&mut self, lang: TextLang) {
+        self.text_lang = lang;
     }
 
     pub fn set_system_ini(&mut self, ini: IniFile) {
@@ -1464,7 +1477,13 @@ impl ScriptRuntime {
         self.system_ini = Some(ini);
     }
 
-    pub fn load_configured_font(&mut self, resource_manager: &mut ResourceManager, nls: Nls) {
+    pub fn load_configured_font(
+        &mut self,
+        resource_manager: &mut ResourceManager,
+        nls: Nls,
+        root: Option<&Path>,
+        font_file: Option<&Path>,
+    ) {
         let name = self
             .system_ini
             .as_ref()
@@ -1488,6 +1507,40 @@ impl ScriptRuntime {
                 ),
             },
             Err(err) => log::debug!("[trace-text] PAL bitmap font {name:?} unavailable: {err}"),
+        }
+        self.load_external_font(root, font_file);
+    }
+
+    /// Load a TrueType face shipped with the game data as the text fallback.
+    ///
+    /// Releases that carry their CJK faces as loose `fonts/*.ttf` instead of
+    /// extending `DEFAULT_FONT.DAT` need these faces for the glyphs the PAL
+    /// bitmap font and the embedded `default.ttf` do not cover. No face name is
+    /// baked in: the caller either names a file or the engine takes the first
+    /// `*.ttf` of the game's own `fonts` directory in sorted order.
+    fn load_external_font(&mut self, root: Option<&Path>, font_file: Option<&Path>) {
+        let path = match font_file {
+            Some(path) => Some(path.to_path_buf()),
+            None => root.and_then(discover_game_font),
+        };
+        let Some(path) = path else {
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                if self.font_state.load_external_font(bytes) {
+                    log::debug!("[trace-text] loaded external font {}", path.display());
+                } else {
+                    log::warn!(
+                        "[trace-text] external font {} is not a usable TrueType face",
+                        path.display()
+                    );
+                }
+            }
+            Err(err) => log::warn!(
+                "[trace-text] external font {} is unreadable: {err}",
+                path.display()
+            ),
         }
     }
 
@@ -15517,9 +15570,15 @@ impl ScriptRuntime {
             return self.dynamic_strings.get(index).cloned();
         }
         let offset = value.try_into().ok()?;
-        read_text_record_string(&assets.text_dat.bytes, offset, nls)
-            .or_else(|| read_c_string(&assets.text_dat.bytes, offset, nls))
-            .or_else(|| read_c_string(&assets.file_dat.bytes, offset, nls))
+        read_text_record_string(
+            &assets.text_dat.bytes,
+            offset,
+            nls,
+            assets.text_dat_multilingual,
+        )
+        .map(|text| select_text_field(text, self.text_lang, assets.text_dat_multilingual))
+        .or_else(|| read_c_string(&assets.text_dat.bytes, offset, nls))
+        .or_else(|| read_c_string(&assets.file_dat.bytes, offset, nls))
     }
 
     fn resolve_resource_string(&self, value: i32, assets: &CoreAssets, nls: Nls) -> Option<String> {
@@ -15530,15 +15589,21 @@ impl ScriptRuntime {
             return self.dynamic_strings.get(index).cloned();
         }
         let offset = value.try_into().ok()?;
-        read_file_slot_string(&assets.file_dat.bytes, value, nls)
+        read_file_slot_string(&assets.file_dat.bytes, value, nls, assets.file_dat_layout)
             .or_else(|| read_padded_c_string(&assets.file_dat.bytes, offset, nls))
             .or_else(|| {
-                read_text_record_string(&assets.file_dat.bytes, offset, nls)
+                read_text_record_string(&assets.file_dat.bytes, offset, nls, false)
                     .filter(|value| is_plausible_resource_name(value))
             })
             .or_else(|| {
-                read_text_record_string(&assets.text_dat.bytes, offset, nls)
-                    .filter(|value| is_plausible_resource_name(value))
+                read_text_record_string(
+                    &assets.text_dat.bytes,
+                    offset,
+                    nls,
+                    assets.text_dat_multilingual,
+                )
+                .map(|text| select_text_field(text, self.text_lang, assets.text_dat_multilingual))
+                .filter(|value| is_plausible_resource_name(value))
             })
             .or_else(|| {
                 read_c_string(&assets.text_dat.bytes, offset, nls)
@@ -17737,9 +17802,67 @@ fn blit_rgba(
     }
 }
 
-fn read_text_record_string(bytes: &[u8], offset: usize, nls: Nls) -> Option<String> {
+fn read_text_record_string(bytes: &[u8], offset: usize, nls: Nls, multilingual: bool) -> Option<String> {
     let start = offset.checked_add(4)?;
-    read_c_string(bytes, start, nls)
+    if multilingual {
+        read_utf16_c_string(bytes, start)
+    } else {
+        read_c_string(bytes, start, nls)
+    }
+}
+
+/// Read the NUL-terminated UTF-16LE string at `offset`.
+///
+/// Used by the FHD text layout, whose records are UTF-16LE; the original
+/// single-byte layout would stop at the high byte of the first character.
+fn read_utf16_c_string(bytes: &[u8], offset: usize) -> Option<String> {
+    if offset >= bytes.len() {
+        return None;
+    }
+    let mut units = Vec::new();
+    let mut position = offset;
+    while position + 2 <= bytes.len() {
+        let unit = u16::from_le_bytes([bytes[position], bytes[position + 1]]);
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+        position += 2;
+    }
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// Pick this language's field out of a multi-language text record.
+///
+/// The FHD pool joins one field per language with U+203B. Records without the
+/// separator (UI format strings) are returned unchanged, and a table that only
+/// holds one language never reaches the split, so the original releases render
+/// byte-for-byte as before.
+fn select_text_field(text: String, lang: TextLang, multilingual: bool) -> String {
+    if !multilingual || !text.contains(TEXT_FIELD_SEPARATOR) {
+        return text;
+    }
+    match text.split(TEXT_FIELD_SEPARATOR).nth(lang.field_index()) {
+        Some(field) => field.to_owned(),
+        None => text,
+    }
+}
+
+/// First TrueType face of the game's own `fonts` directory, sorted by path.
+fn discover_game_font(root: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(root.join("fonts"))
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ttf"))
+        })
+        .collect();
+    candidates.sort();
+    candidates.into_iter().next()
 }
 
 /// Text-pool record id (the 4-byte header read_text_record_string skips).
@@ -17776,10 +17899,20 @@ fn read_padded_c_string(bytes: &[u8], mut offset: usize, nls: Nls) -> Option<Str
     read_c_string(bytes, offset, nls).filter(|value| is_plausible_resource_name(value))
 }
 
-fn read_file_slot_string(bytes: &[u8], value: i32, nls: Nls) -> Option<String> {
+fn read_file_slot_string(
+    bytes: &[u8],
+    value: i32,
+    nls: Nls,
+    layout: FileDatLayout,
+) -> Option<String> {
     let index: usize = value.try_into().ok()?;
-    let offset = 0x10usize.checked_add(index.checked_mul(0x20)?)?;
-    read_c_string(bytes, offset, nls).filter(|value| is_plausible_resource_name(value))
+    let offset = layout.base.checked_add(index.checked_mul(layout.stride)?)?;
+    let text = if layout.utf16 {
+        read_utf16_c_string(bytes, offset)?
+    } else {
+        read_c_string(bytes, offset, nls)?
+    };
+    is_plausible_resource_name(&text).then_some(text)
 }
 
 fn is_plausible_resource_name(value: &str) -> bool {
@@ -18532,6 +18665,8 @@ mod tests {
             mem_dat: empty_asset("Mem.dat"),
             point_dat: empty_asset("Point.dat"),
             graphic_dat: None,
+            text_dat_multilingual: false,
+            file_dat_layout: FileDatLayout::default(),
             script_check_value: 0,
             script_entry_pc: 12,
             extended_softpal: false,
@@ -19253,6 +19388,8 @@ mod tests {
                 },
             },
             graphic_dat: None,
+            text_dat_multilingual: false,
+            file_dat_layout: FileDatLayout::default(),
             script_check_value: 0,
             script_entry_pc: 0x100,
             extended_softpal: false,

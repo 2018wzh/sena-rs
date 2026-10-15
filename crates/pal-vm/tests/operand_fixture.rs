@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use pal_asset::{AssetSource, LoadedAsset};
 use pal_script::PointTable;
-use pal_vm::{CoreAssets, FrameEvent, RuntimeStatus, ScriptRuntime, ScriptRuntimeConfig};
+use pal_vm::{CoreAssets, FileDatLayout, FrameEvent, RuntimeStatus, ScriptRuntime, ScriptRuntimeConfig};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -90,6 +90,8 @@ fn assets_with_script(entry_pc: u32, script_body: Vec<u8>) -> CoreAssets {
         mem_dat: asset("Mem.dat", Vec::new()),
         point_dat: asset("Point.dat", Vec::new()),
         graphic_dat: None,
+        text_dat_multilingual: false,
+        file_dat_layout: FileDatLayout::default(),
         extended_softpal: false,
         script_check_value: 0,
         script_entry_pc: entry_pc,
