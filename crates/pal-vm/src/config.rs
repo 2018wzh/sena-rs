@@ -308,11 +308,42 @@ pub fn parse_ini_nls(bytes: &[u8], nls: Nls) -> anyhow::Result<IniFile> {
     parse_ini_text(&text)
 }
 
+/// Parse `SYSTEM.INI`, which is engine configuration rather than game text, so
+/// the game's text encoding must not be able to drop it.
+///
+/// The caller's NLS picks how the game's own scripts and strings are read. The
+/// FHD Chinese releases keep `SYSTEM.INI` inside `data.pac` in the engine's
+/// Shift-JIS: importing one as UTF-8 made the strict decode fail, the release's
+/// logical size and text size silently fell back to the PAL defaults
+/// (1280x720, 28px), and the title screen came out cropped to the top-left of
+/// its layout. Read the caller's encoding first and keep the engine's own as
+/// the fallback, the way the native engine reads this file.
+pub fn parse_system_ini(bytes: &[u8], nls: Nls) -> anyhow::Result<IniFile> {
+    match parse_ini_nls(bytes, nls) {
+        Ok(ini) => {
+            log::info!("SYSTEM.INI decoded as {nls:?}");
+            Ok(ini)
+        }
+        Err(requested) => match parse_ini_nls(bytes, Nls::ShiftJis) {
+            Ok(ini) => {
+                log::warn!(
+                    "SYSTEM.INI does not decode as {nls:?} ({requested}); \
+                     read as the engine's Shift-Jis"
+                );
+                Ok(ini)
+            }
+            Err(engine) => Err(anyhow::anyhow!(
+                "SYSTEM.INI decode failed as {nls:?} ({requested}) and as Shift-Jis ({engine})"
+            )),
+        },
+    }
+}
+
 /// Load and parse an INI file from disk with NLS decoding.
 pub fn load_ini_nls(path: &Path, nls: Nls) -> anyhow::Result<IniFile> {
     let bytes = vfs::read_all(path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-    parse_ini_nls(&bytes, nls).map_err(|e| anyhow::anyhow!("{} (file: {})", e, path.display()))
+    parse_system_ini(&bytes, nls).map_err(|e| anyhow::anyhow!("{} (file: {})", e, path.display()))
 }
 
 fn parse_ini_text(text: &str) -> anyhow::Result<IniFile> {

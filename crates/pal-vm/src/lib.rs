@@ -43,7 +43,7 @@ pub use app::{
 pub use assets::{CoreAssets, FileDatLayout, GraphicIndex};
 pub use audio::{AudioConfig, AudioHandle, AudioSystem, PalSoundGroup, PalSoundStatus, PalVolume};
 pub use config::{
-    load_system_ini, parse_ini_nls, ConfigDat, EngineStartupConfig, IniFile, IniSection, IniValue,
+    load_system_ini, parse_ini_nls, parse_system_ini, ConfigDat, EngineStartupConfig, IniFile, IniSection, IniValue,
     SystemDat, TextLang,
 };
 pub use debug::{

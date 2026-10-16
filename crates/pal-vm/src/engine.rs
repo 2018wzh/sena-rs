@@ -5,7 +5,7 @@ use pal_asset::{Nls, ResourceManager};
 
 use crate::assets::CoreAssets;
 use crate::audio::{AudioConfig, AudioHandle, AudioSystem, PalSoundGroup};
-use crate::config::{ini_graphics_size, parse_ini_nls, EngineStartupConfig, TextLang};
+use crate::config::{ini_graphics_size, parse_system_ini, EngineStartupConfig, TextLang};
 use crate::debug::{collect_frame_dump, pal_debug_enabled, pal_debug_frame_enabled, print_dump};
 use crate::event::PalEvent;
 use crate::input::PalInputState;
@@ -96,19 +96,20 @@ impl Engine {
                     // non-fatal.
                     if startup_config.system_ini.is_none() {
                         match resource_manager.open("SYSTEM.INI") {
-                            Ok(asset) => match parse_ini_nls(&asset.bytes, config.nls) {
+                            Ok(asset) => match parse_system_ini(&asset.bytes, config.nls) {
                                 Ok(ini) => {
-                                    log::debug!(
-                                        "[trace-assets] SYSTEM.INI loaded from the PAL archive"
+                                    log::info!(
+                                        "SYSTEM.INI loaded from the PAL archive; its logical size \
+                                         and font keys apply"
                                     );
                                     startup_config.system_ini = Some(ini);
                                 }
                                 Err(err) => log::warn!(
-                                    "[trace-assets] archived SYSTEM.INI parse failed: {err}"
+                                    "archived SYSTEM.INI parse failed: {err}"
                                 ),
                             },
                             Err(err) => log::debug!(
-                                "[trace-assets] no loose or archived SYSTEM.INI: {err}"
+                                "no loose or archived SYSTEM.INI: {err}"
                             ),
                         }
                     }

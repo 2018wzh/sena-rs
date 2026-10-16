@@ -1,5 +1,6 @@
-use pal_asset::Nls;
-use pal_vm::{parse_ini_nls, EngineStartupConfig, FrameScene, IniValue};
+use pal_asset::{Nls, ResourceManager};
+use pal_vm::config::ini_graphics_size;
+use pal_vm::{parse_ini_nls, parse_system_ini, EngineStartupConfig, FrameScene, IniValue};
 use std::path::PathBuf;
 
 #[test]
@@ -76,6 +77,40 @@ fn parse_sjis_ini_does_not_use_lossy() {
     assert_eq!(
         result.get("section").unwrap().get("k"),
         Some(&IniValue::Int(1))
+    );
+}
+
+#[test]
+fn system_ini_falls_back_to_the_engine_encoding() {
+    // A Shift-JIS comment (テ, 0x83 0x65, which is not valid UTF-8) ahead of the
+    // keys the engine reads: the launcher's text encoding must not be able to
+    // drop the release's own size.
+    let mut bytes = vec![b';', 0x83, 0x65];
+    bytes.extend_from_slice(b" config\r\n[graphics]\r\ndef_cg_width = 1920\r\ndef_cg_height = 1080\r\n");
+    let result = parse_system_ini(&bytes, Nls::Utf8).expect("Shift-JIS fallback");
+    assert_eq!(ini_graphics_size(Some(&result), 0, 0), (1920, 1080));
+}
+
+#[test]
+fn chinese_fhd_archived_system_ini_survives_a_utf8_caller() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("testcase-cn/想要传达给你的爱恋");
+    if !root.join("data.pac").is_file() {
+        eprintln!("skipping: the Chinese FHD fixture is not present");
+        return;
+    }
+    let mut manager = ResourceManager::bootstrap_with_language(&root, Nls::Utf8, None)
+        .expect("bootstrap the Chinese release");
+    let asset = manager.open("SYSTEM.INI").expect("archived SYSTEM.INI");
+    let ini = parse_system_ini(&asset.bytes, Nls::Utf8).expect("parse");
+    assert_eq!(
+        ini_graphics_size(Some(&ini), 0, 0),
+        (1920, 1080),
+        "the FHD release's logical size must survive any caller encoding"
     );
 }
 

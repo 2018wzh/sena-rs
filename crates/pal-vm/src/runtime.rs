@@ -16,7 +16,7 @@ use crate::audio::{
     PalSoundGroup, PalVolume,
 };
 use crate::config::{
-    ini_graphics_size, parse_ini_nls, IniFile, IniValue, TextLang, TEXT_FIELD_SEPARATOR,
+    ini_graphics_size, parse_system_ini, IniFile, IniValue, TextLang, TEXT_FIELD_SEPARATOR,
 };
 use crate::effect::PalEffectSystem;
 use crate::font::PalFontSystem;
@@ -15729,10 +15729,10 @@ impl ScriptRuntime {
                         "[trace-assets] ini open name=\"SYSTEM.INI\" source={}",
                         asset_source_label(&asset.source)
                     );
-                    match parse_ini_nls(&asset.bytes, resource_manager.nls()) {
+                    match parse_system_ini(&asset.bytes, resource_manager.nls()) {
                         Ok(ini) => self.set_system_ini(ini),
                         Err(err) => {
-                            log::warn!("[trace-assets] SYSTEM.INI parse failed: {err}");
+                            log::warn!("SYSTEM.INI parse failed: {err}");
                             return None;
                         }
                     }
