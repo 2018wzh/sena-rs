@@ -10569,6 +10569,8 @@ impl ScriptRuntime {
             decoded.height,
             decoded.offset_x,
             decoded.offset_y,
+            logical_width,
+            logical_height,
         );
         let project_native_draw = should_project_game_sprite_native_draw(arg_count, decoded.height);
         if arg_count < 5 && !project_native_draw && raw_x != 0xFFFF && raw_y != 0xFFFF {
@@ -11025,8 +11027,18 @@ impl ScriptRuntime {
         self.game_sprite_native_scales.insert(slot, 100);
         self.game_sprite_base_alpha.entry(slot).or_insert(255);
         self.game_sprite_final_alpha_delta.insert(slot, 0);
-        let (mut native_x, mut native_y, native_z) =
-            native_place_sprite(arg_count, raw_x, raw_y, raw_z, width, height, 0, 0);
+        let (mut native_x, mut native_y, native_z) = native_place_sprite(
+            arg_count,
+            raw_x,
+            raw_y,
+            raw_z,
+            width,
+            height,
+            0,
+            0,
+            logical_width,
+            logical_height,
+        );
         if arg_count < 5 && height <= logical_height && raw_x != 0xFFFF && raw_y != 0xFFFF {
             native_x = unproject_script_x(x, logical_width);
             native_y = unproject_script_y(y, logical_height);
@@ -13240,6 +13252,8 @@ impl ScriptRuntime {
                 decoded.height,
                 decoded.offset_x,
                 decoded.offset_y,
+                logical_width,
+                logical_height,
             );
             GameSpriteWrapperVisual {
                 native_x,
@@ -16337,12 +16351,22 @@ fn native_place_sprite(
     height: u32,
     default_x: i32,
     default_y: i32,
+    logical_width: u32,
+    logical_height: u32,
 ) -> (f32, f32, f32) {
     if raw_x == 0xFFFF && raw_y == 0xFFFF {
-        // PGD default offsets are authored in the 1280x720 script space. The
-        // wrapper stores native 1920x1080 positions before projecting back
-        // to the configured logical stage; convert these offsets just once.
-        return (default_x as f32 * 1.5, default_y as f32 * 1.5, raw_z as f32);
+        // PGD default offsets are authored in the release's own stage space:
+        // 1280x720 for the original release, 1920x1080 for the FHD releases
+        // that re-author the same artwork at 1.5x. The wrapper stores native
+        // 1920x1080 positions before projecting back to the configured logical
+        // stage; convert these offsets just once, by that same stage scale.
+        let to_native_x = 1920.0 / logical_width.max(1) as f32;
+        let to_native_y = 1080.0 / logical_height.max(1) as f32;
+        return (
+            default_x as f32 * to_native_x,
+            default_y as f32 * to_native_y,
+            raw_z as f32,
+        );
     }
     if arg_count >= 5 {
         let mut x = raw_x;
@@ -18872,8 +18896,14 @@ mod tests {
 
     #[test]
     fn pgd_default_offsets_use_native_stage_coordinates() {
-        let (x, y, z) = native_place_sprite(5, 0xFFFF, 0xFFFF, 70, 464, 144, 408, 288);
+        let (x, y, z) =
+            native_place_sprite(5, 0xFFFF, 0xFFFF, 70, 464, 144, 408, 288, 1280, 720);
         assert_eq!((x, y, z), (612.0, 432.0, 70.0));
+        // The FHD releases author the same artwork and its default offsets in
+        // their own 1920x1080 stage, so there the offsets are already native.
+        let (x, y, z) =
+            native_place_sprite(5, 0xFFFF, 0xFFFF, 70, 634, 208, 627, 370, 1920, 1080);
+        assert_eq!((x, y, z), (627.0, 370.0, 70.0));
     }
 
     #[test]
