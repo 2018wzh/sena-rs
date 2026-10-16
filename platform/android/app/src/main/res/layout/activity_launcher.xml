@@ -5,33 +5,37 @@
     android:orientation="vertical"
     android:padding="12dp">
 
-    <LinearLayout
+    <!-- A phone in portrait cannot hold the import button and both selectors in
+         one row: with fixed-width spinners the row was wider than the screen,
+         so the button and the language value were clipped at the edges. The
+         button sits on its own line and the spinners share the row by weight. -->
+    <Button
+        android:id="@+id/btn_import"
         android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center_horizontal"
-        android:gravity="center"
-        android:orientation="horizontal">
+        android:layout_height="40dp"
+        android:minHeight="0dp"
+        android:text="Import" />
 
-        <Button
-            android:id="@+id/btn_import"
-            android:layout_width="wrap_content"
-            android:layout_height="40dp"
-            android:minHeight="0dp"
-            android:text="Import" />
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="40dp"
-            android:layout_marginStart="12dp"
             android:gravity="center"
             android:text="NLS"
             android:textSize="13sp" />
 
         <Spinner
             android:id="@+id/spinner_nls"
-            android:layout_width="128dp"
+            android:layout_width="0dp"
             android:layout_height="40dp"
-            android:layout_marginStart="6dp" />
+            android:layout_marginStart="6dp"
+            android:layout_weight="1" />
 
         <TextView
             android:layout_width="wrap_content"
@@ -43,15 +47,32 @@
 
         <Spinner
             android:id="@+id/spinner_lang"
-            android:layout_width="128dp"
+            android:layout_width="0dp"
             android:layout_height="40dp"
-            android:layout_marginStart="6dp" />
+            android:layout_marginStart="6dp"
+            android:layout_weight="1" />
     </LinearLayout>
 
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/game_grid"
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_marginTop="8dp"
-        android:layout_weight="1" />
+        android:layout_weight="1">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/game_grid"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <TextView
+            android:id="@+id/empty_hint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:padding="24dp"
+            android:text="No games imported yet. Tap Import and pick the game folder that contains data.pac."
+            android:textSize="14sp"
+            android:visibility="gone" />
+    </FrameLayout>
 </LinearLayout>

@@ -6,9 +6,11 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.Settings;
+import android.view.View;
 import android.widget.Button;
 import android.widget.ArrayAdapter;
 import android.widget.Spinner;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -34,6 +36,7 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
     private GameAdapter adapter;
     private Spinner nlsSpinner;
     private Spinner langSpinner;
+    private TextView emptyHint;
 
     private final ActivityResultLauncher<Uri> openTreeLauncher =
             registerForActivityResult(new ActivityResultContracts.OpenDocumentTree(), this::onImportTreeSelected);
@@ -50,6 +53,8 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
         rv.setLayoutManager(new GridLayoutManager(this, computeColumnCount()));
         adapter = new GameAdapter(this);
         rv.setAdapter(adapter);
+
+        emptyHint = findViewById(R.id.empty_hint);
 
         Button importBtn = findViewById(R.id.btn_import);
         importBtn.setOnClickListener(v -> startImportFlow());
@@ -72,6 +77,9 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
     private void refresh() {
         List<GameEntry> entries = library.load();
         adapter.setItems(entries);
+        if (emptyHint != null) {
+            emptyHint.setVisibility(entries.isEmpty() ? View.VISIBLE : View.GONE);
+        }
     }
 
     private int computeColumnCount() {
