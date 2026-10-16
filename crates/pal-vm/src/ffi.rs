@@ -383,6 +383,25 @@ pub extern "C" fn sena_host_destroy(handle: *mut c_void) {
     }
 }
 
+/// The native-activity entry point the Android platform never calls.
+///
+/// `winit`'s `android-native-activity` backend links the native-activity glue,
+/// and the glue is what the application library is supposed to complete: the
+/// entry point belongs to the app, not to the glue. This platform drives the
+/// engine from Java through JNI and a `SurfaceView`
+/// (`platform/android/app/src/main/cpp/sena_jni.cpp`), so nothing ever calls
+/// it -- but the symbol has to exist, because an undefined one makes the
+/// dynamic linker refuse to load the library at all
+/// (`dlopen failed: cannot locate symbol "android_main"`), which is what the
+/// launcher saw when it asked the engine for a game's title.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn android_main(_app: *mut c_void) {
+    log::warn!(
+        "android_main was called, but the Android host drives the engine through JNI"
+    );
+}
+
 #[no_mangle]
 pub extern "C" fn sena_android_init_context(_java_vm_ptr: *mut c_void, _context_ptr: *mut c_void) {}
 
