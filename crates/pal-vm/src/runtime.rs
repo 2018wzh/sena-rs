@@ -498,6 +498,18 @@ pub struct ScriptRuntime {
     system_ini: Option<IniFile>,
     /// Language field read out of multi-language text records.
     text_lang: TextLang,
+    /// TrueType faces the release ships as loose files, in path order.
+    ///
+    /// Kept past boot so a later font-type change (`set_language`, category 9
+    /// index 17) can switch the text face without the game root at hand.
+    font_face_candidates: Vec<PathBuf>,
+    /// The loose face currently loaded as the text face, when one is.
+    loaded_face_path: Option<PathBuf>,
+    /// Whether this release lets the PAL font type select among its own faces.
+    ///
+    /// Only a localized release that ships several faces offers the choice;
+    /// the original installs keep their bitmap and embedded faces.
+    style_faces_enabled: bool,
     system_state: PalSystemState,
     /// PAL random seed ring used by PalRandomEx and Game category 20 random.
     random_state: PalRandomState,
@@ -1440,6 +1452,9 @@ impl ScriptRuntime {
             dynamic_string_cursor: 0,
             system_ini: None,
             text_lang: TextLang::default(),
+            font_face_candidates: Vec::new(),
+            loaded_face_path: None,
+            style_faces_enabled: false,
             system_state: PalSystemState::new(),
             random_state: PalRandomState::default(),
             frame_events: Vec::new(),
@@ -1472,10 +1487,17 @@ impl ScriptRuntime {
             return;
         }
         self.set_text_lang(lang);
+        self.invalidate_text_layout();
+    }
+
+    /// Re-typeset everything already rendered from the current text.
+    ///
+    /// The body panel is rasterized once per text change; dropping the cache
+    /// re-resolves and rebuilds it even if the text is hidden at the moment of
+    /// the change (a hidden window only clears `dirty`). The backlog is
+    /// measured again for the same reason.
+    fn invalidate_text_layout(&mut self) {
         self.text_state.dirty = true;
-        // The body panel is rasterized once per text change; dropping the cache
-        // re-resolves and rebuilds it even if the text is hidden at the moment
-        // of the switch (a hidden window only clears `dirty`).
         self.text_state.render_cache = None;
         self.history_state.layout_cache = None;
     }
@@ -1530,35 +1552,24 @@ impl ScriptRuntime {
             },
             Err(err) => log::debug!("[trace-text] PAL bitmap font {name:?} unavailable: {err}"),
         }
-        let external = self.load_external_font(root, font_file, lang);
+        self.font_face_candidates = game_font_faces(root, font_file);
+        let face = pick_face_for(&self.font_face_candidates, lang, None);
+        let external = self.load_face(face);
         // A localized release ships the original `DEFAULT_FONT.DAT` and draws
         // text with its own faces, so only leave the bitmap font in play when
-        // such a release supplied no face at all.
+        // such a release supplied no face at all. Such a release also asks the
+        // player to choose the face on its SYSTEM screen, which reaches the
+        // engine as a PAL font type — only where it ships more than one face.
         if text_dat_multilingual && external {
             self.font_state.set_bitmap_text_enabled(false);
+            self.style_faces_enabled = self.font_face_candidates.len() > 1;
         }
     }
 
-    /// Load a TrueType face shipped with the game data as the text face.
-    ///
-    /// Releases that carry their CJK faces as loose `fonts/*.ttf` instead of
-    /// extending `DEFAULT_FONT.DAT` need these faces for the glyphs the PAL
-    /// bitmap font and the embedded `default.ttf` do not cover, and the
-    /// localized releases draw their text from them outright. No face name is
-    /// baked in: the caller either names a file or the engine takes the face of
-    /// the game's own `fonts` directory that `lang` selects.
+    /// Load `path` as the text face, remembering it as the active one.
     ///
     /// Returns whether a face was loaded.
-    fn load_external_font(
-        &mut self,
-        root: Option<&Path>,
-        font_file: Option<&Path>,
-        lang: TextLang,
-    ) -> bool {
-        let path = match font_file {
-            Some(path) => Some(path.to_path_buf()),
-            None => root.and_then(|root| discover_game_font(root, lang)),
-        };
+    fn load_face(&mut self, path: Option<PathBuf>) -> bool {
         let Some(path) = path else {
             return false;
         };
@@ -1566,6 +1577,7 @@ impl ScriptRuntime {
             Ok(bytes) => {
                 if self.font_state.load_external_font(bytes) {
                     log::debug!("[trace-text] loaded external font {}", path.display());
+                    self.loaded_face_path = Some(path);
                     true
                 } else {
                     log::warn!(
@@ -1582,6 +1594,31 @@ impl ScriptRuntime {
                 );
                 false
             }
+        }
+    }
+
+    /// Re-select the text face that a PAL font type names.
+    ///
+    /// The FHD releases offer 思源宋体 and 思源黑体 on their SYSTEM screen and
+    /// record the picked row as the PAL font type the boot path passes to
+    /// `set_language` (category 9 index 17), so the type doubles as the face
+    /// style there. The row writes no other state and the change is applied
+    /// here rather than by a live redraw, matching those releases' engine: the
+    /// stored type is picked up on the next boot. The original releases ship no
+    /// such faces and keep the face boot selected.
+    fn select_style_face(&mut self, style: FaceStyle) {
+        if !self.style_faces_enabled {
+            return;
+        }
+        let lang = self.text_lang;
+        let Some(path) = pick_face_for(&self.font_face_candidates, lang, Some(style)) else {
+            return;
+        };
+        if self.loaded_face_path.as_deref() == Some(path.as_path()) {
+            return;
+        }
+        if self.load_face(Some(path)) {
+            self.invalidate_text_layout();
         }
     }
 
@@ -5682,6 +5719,11 @@ impl ScriptRuntime {
                 if let Some(font_type) = args.first().copied() {
                     self.font_state.set_type(font_type.max(0) as u16);
                     self.system_state.set_language(font_type);
+                    // On a release that ships its own faces the type also names
+                    // the text face style (the SYSTEM screen's 文本字体 row).
+                    if let Some(style) = FaceStyle::from_font_type(font_type.max(0) as u16) {
+                        self.select_style_face(style);
+                    }
                 }
                 ExtCallOutcome::Value(1)
             }
@@ -17913,21 +17955,100 @@ fn select_text_field(text: String, lang: TextLang, multilingual: bool) -> String
     }
 }
 
-/// TrueType face of the game's own `fonts` directory that `lang` selects.
-fn discover_game_font(root: &Path, lang: TextLang) -> Option<PathBuf> {
+/// Text face style a PAL font type names on a release that ships its own faces.
+///
+/// The FHD releases offer 思源宋体 and 思源黑体 on their SYSTEM screen, store the
+/// picked row as the PAL font type the boot `set_language` applies, and tag the
+/// style in the shipped file names (`SourceHanSerif-Medium`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FaceStyle {
+    Serif,
+    Sans,
+}
+
+impl FaceStyle {
+    /// Style a PAL font type selects: the 宋体 row stores 0 and the 黑体 row 1.
+    /// The original releases' types (including the bitmap type 4) name no face.
+    fn from_font_type(font_type: u16) -> Option<Self> {
+        match font_type {
+            0 => Some(Self::Serif),
+            1 => Some(Self::Sans),
+            _ => None,
+        }
+    }
+
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Serif => "serif",
+            Self::Sans => "sans",
+        }
+    }
+}
+
+/// TrueType faces the release ships as loose files, in path order.
+///
+/// The caller's `--font-file` is the whole set; otherwise this is the game's own
+/// `fonts` directory, which the original installs do not have.
+fn game_font_faces(root: Option<&Path>, font_file: Option<&Path>) -> Vec<PathBuf> {
+    if let Some(path) = font_file {
+        return vec![path.to_path_buf()];
+    }
+    let Some(root) = root else {
+        return Vec::new();
+    };
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(root.join("fonts"))
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ttf"))
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_file()
+                        && path
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("ttf"))
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
     candidates.sort();
-    pick_face(candidates, lang)
+    candidates
+}
+
+/// Pick the face of `style` for `lang`, falling back to the language's face.
+///
+/// A release that ships both styles tags both the script and the style in the
+/// file name, so the language's own tagged face wins and a style it does not
+/// ship (or a single-face install) keeps the face `pick_face` selects.
+fn pick_face_for(
+    candidates: &[PathBuf],
+    lang: TextLang,
+    style: Option<FaceStyle>,
+) -> Option<PathBuf> {
+    let Some(style) = style else {
+        return pick_face(candidates.to_vec(), lang);
+    };
+    let tagged = |path: &Path, tag: &str| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.to_ascii_lowercase().contains(tag))
+    };
+    let style = style.tag();
+    let language = match lang {
+        TextLang::Cn | TextLang::Tc => Some("cn"),
+        TextLang::Jp => None,
+    };
+    if let Some(language) = language {
+        if let Some(face) = candidates
+            .iter()
+            .find(|path| tagged(path, language) && tagged(path, style))
+        {
+            return Some(face.clone());
+        }
+    }
+    if let Some(face) = candidates.iter().find(|path| tagged(path, style)) {
+        return Some(face.clone());
+    }
+    pick_face(candidates.to_vec(), lang)
 }
 
 /// Pick the face tagged for `lang`, falling back to the first one by path.
@@ -18462,6 +18583,107 @@ mod tests {
             );
         }
         assert_eq!(pick_face(Vec::new(), TextLang::Cn), None);
+    }
+
+    #[test]
+    fn font_style_selects_the_release_face_of_that_style() {
+        let shipped = [
+            PathBuf::from("fonts/SourceHanSans-Medium.ttf"),
+            PathBuf::from("fonts/SourceHanSansCN-Medium.ttf"),
+            PathBuf::from("fonts/SourceHanSerif-Medium.ttf"),
+        ];
+        let picked = |lang, style| pick_face_for(&shipped, lang, Some(style));
+        // Each language keeps its own script: the Chinese 黑体 row reaches the
+        // Chinese sans face, the Japanese one the Japanese sans face.
+        assert_eq!(picked(TextLang::Cn, FaceStyle::Sans), Some(shipped[1].clone()));
+        assert_eq!(picked(TextLang::Tc, FaceStyle::Sans), Some(shipped[1].clone()));
+        assert_eq!(picked(TextLang::Jp, FaceStyle::Sans), Some(shipped[0].clone()));
+        // Both languages share the one serif face.
+        for lang in [TextLang::Jp, TextLang::Cn, TextLang::Tc] {
+            assert_eq!(picked(lang, FaceStyle::Serif), Some(shipped[2].clone()));
+        }
+        // No style requested keeps the language's face, as does a style the
+        // release does not ship.
+        assert_eq!(
+            pick_face_for(&shipped, TextLang::Cn, None),
+            Some(shipped[1].clone())
+        );
+        let sans_only = [PathBuf::from("fonts/SourceHanSansCN-Medium.ttf")];
+        assert_eq!(
+            pick_face_for(&sans_only, TextLang::Cn, Some(FaceStyle::Serif)),
+            Some(sans_only[0].clone())
+        );
+    }
+
+    #[test]
+    fn font_type_names_the_face_style_of_a_localized_release() {
+        assert_eq!(FaceStyle::from_font_type(0), Some(FaceStyle::Serif));
+        assert_eq!(FaceStyle::from_font_type(1), Some(FaceStyle::Sans));
+        // The bitmap type of the original releases and the remaining types
+        // name no shipped face.
+        for font_type in [2, 3, 4, 17] {
+            assert_eq!(FaceStyle::from_font_type(font_type), None);
+        }
+    }
+
+    /// The SYSTEM screen's 文本字体 row stores a PAL font type; a release that
+    /// ships those faces switches the text face when that type is applied.
+    #[test]
+    fn font_type_switch_selects_the_release_face_of_that_style() {
+        let root = std::env::temp_dir().join("sena_rs_face_style_test");
+        let fonts = root.join("fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        let shipped = [
+            "SourceHanSans-Medium.ttf",
+            "SourceHanSansCN-Medium.ttf",
+            "SourceHanSerif-Medium.ttf",
+        ];
+        for name in shipped {
+            std::fs::write(fonts.join(name), include_bytes!("default.ttf")).unwrap();
+        }
+        let (assets, points) = empty_core_assets(true);
+        let mut runtime = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        runtime.text_lang = TextLang::Cn;
+        runtime.font_face_candidates = game_font_faces(Some(&root), None);
+        assert_eq!(runtime.font_face_candidates.len(), 3);
+        // Boot picked the Chinese face; the row then stores 宋体 (type 0).
+        runtime.loaded_face_path = Some(fonts.join(shipped[1]));
+        runtime.style_faces_enabled = true;
+        runtime.stack.push(0);
+        let outcome =
+            runtime.dispatch_extcall(9, 17, &[], &assets, &points, None, None, None, None, None);
+        assert!(matches!(outcome, ExtCallOutcome::Value(1)));
+        assert!(runtime.stack.is_empty(), "the font type argument is consumed");
+        assert_eq!(runtime.font_state.font_type(), 0);
+        assert_eq!(runtime.loaded_face_path, Some(fonts.join(shipped[2])));
+        assert!(runtime.text_state.dirty, "the parked line re-typesets");
+        // 黑体 (type 1) goes back to the Chinese sans face.
+        runtime.stack.push(1);
+        runtime.dispatch_extcall(9, 17, &[], &assets, &points, None, None, None, None, None);
+        assert_eq!(runtime.loaded_face_path, Some(fonts.join(shipped[1])));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The original releases have one face at most, so a font type leaves it
+    /// alone even where a caller named one.
+    #[test]
+    fn font_type_leaves_a_single_face_release_alone() {
+        let root = std::env::temp_dir().join("sena_rs_face_style_single_test");
+        let fonts = root.join("fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        let face = fonts.join("SomeSansCN.ttf");
+        std::fs::write(&face, include_bytes!("default.ttf")).unwrap();
+        let (assets, points) = empty_core_assets(false);
+        let mut runtime = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        runtime.text_lang = TextLang::Cn;
+        runtime.font_face_candidates = vec![face.clone()];
+        runtime.loaded_face_path = Some(face.clone());
+        runtime.stack.push(0);
+        let dirty = runtime.text_state.dirty;
+        runtime.dispatch_extcall(9, 17, &[], &assets, &points, None, None, None, None, None);
+        assert_eq!(runtime.loaded_face_path, Some(face));
+        assert_eq!(runtime.text_state.dirty, dirty);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
