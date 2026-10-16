@@ -25,7 +25,8 @@ struct Args {
     lang: TextLang,
 
     /// TrueType face for the text fallback. Without it the engine takes the
-    /// first `*.ttf` of the game root's own `fonts` directory.
+    /// face of the game root's own `fonts` directory that is tagged for the
+    /// text language, the first by path otherwise.
     #[arg(long)]
     font_file: Option<PathBuf>,
 
