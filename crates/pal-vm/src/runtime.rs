@@ -1118,6 +1118,10 @@ struct RuntimeSaveSnapshot {
     text_args: [i32; 4],
     text_base: i32,
     text_mode: i32,
+    /// ADV window alpha (category 2 index 11). The script re-establishes it
+    /// whenever a scene or background changes, so a save restored mid-scene
+    /// depends on it; `None` in saves written before version 7.
+    text_alpha: Option<i32>,
     text_visible: bool,
     vars: Vec<i32>,
     stack: Vec<i32>,
@@ -13586,7 +13590,7 @@ impl ScriptRuntime {
 
     fn capture_save_snapshot(&self) -> RuntimeSaveSnapshot {
         RuntimeSaveSnapshot {
-            version: 6,
+            version: 7,
             pc: self.pc,
             call_stack: self.call_stack.clone(),
             user_mem: bounded_i32_copy(&self.user_mem, DEFAULT_MEM_SIZE),
@@ -13597,6 +13601,7 @@ impl ScriptRuntime {
             text_args: self.text_state.last_text_args,
             text_base: self.text_state.base,
             text_mode: self.text_state.mode,
+            text_alpha: Some(self.text_state.alpha),
             text_visible: self.text_state.visible,
             vars: bounded_i32_copy(&self.vars, DEFAULT_VAR_COUNT),
             stack: self.stack.clone(),
@@ -13804,6 +13809,11 @@ impl ScriptRuntime {
             snapshot.text_args = [0, text_value, 0x0FFF_FFFF, 0x0FFF_FFFF];
             snapshot.text_visible = true;
             snapshot.show_wait_mark = true;
+            // The image's ADV window alpha is part of the context this importer
+            // does not map yet, and the menu the save was taken from is not the
+            // scene being restored: show the window instead of inheriting the
+            // menu's alpha.
+            snapshot.text_alpha = Some(255);
         }
         snapshot.resume_wait_click = true;
         Some(snapshot)
@@ -13824,6 +13834,14 @@ impl ScriptRuntime {
         self.text_state.last_text_value = snapshot.text_args[1];
         self.text_state.base = snapshot.text_base;
         self.text_state.mode = snapshot.text_mode;
+        // The script hides and re-shows the ADV window when a scene or
+        // background changes (`text_window_set_alpha` around `text_set_base`),
+        // so a save restored mid-scene has no call coming to re-establish what
+        // the window looked like at save time. Saves written before version 7
+        // and original-engine images carry no alpha: assume the window the
+        // script left on screen is shown, instead of restoring it to alpha 0,
+        // where the base panel paints nothing and the text sits on a naked CG.
+        self.text_state.alpha = snapshot.text_alpha.unwrap_or(255);
         self.text_state.visible = snapshot.text_visible;
         self.text_state.reveal_enabled = false;
         self.text_state.dirty = true;
@@ -16712,7 +16730,7 @@ fn decode_portable_system_mem(bytes: &[u8]) -> std::io::Result<Vec<i32>> {
 fn encode_runtime_save_snapshot(snapshot: &RuntimeSaveSnapshot) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"SENARSAV");
-    write_u32(&mut bytes, 6)?;
+    write_u32(&mut bytes, 7)?;
     write_u32(&mut bytes, snapshot.pc)?;
     write_u32_vec(&mut bytes, &snapshot.call_stack)?;
     write_i32_vec(
@@ -16791,6 +16809,8 @@ fn encode_runtime_save_snapshot(snapshot: &RuntimeSaveSnapshot) -> std::io::Resu
         write_i64(&mut bytes, track.loop_start)?;
         write_i64(&mut bytes, track.loop_end)?;
     }
+    // Version 7 appends the ADV window alpha.
+    write_i32(&mut bytes, snapshot.text_alpha.unwrap_or(0))?;
     Ok(bytes)
 }
 
@@ -16875,7 +16895,7 @@ fn decode_runtime_save_snapshot(reader: &mut impl Read) -> std::io::Result<Runti
         ));
     }
     let version = read_u32_from(reader)?;
-    if !(1..=6).contains(&version) {
+    if !(1..=7).contains(&version) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "unsupported portable save version",
@@ -16989,6 +17009,9 @@ fn decode_runtime_save_snapshot(reader: &mut impl Read) -> std::io::Result<Runti
                     loop_end,
                 });
             }
+        }
+        if version >= 7 {
+            snapshot.text_alpha = Some(read_i32_from(reader)?);
         }
     }
     Ok(snapshot)
@@ -19244,6 +19267,7 @@ mod tests {
             text_args: [12, 13, 14, 15],
             text_base: 16,
             text_mode: 17,
+            text_alpha: Some(200),
             text_visible: true,
             resume_wait_click: true,
             vars: vec![21, 22],
@@ -19293,11 +19317,12 @@ mod tests {
         assert_eq!(restored.text_args, snapshot.text_args);
         assert_eq!(restored.text_base, snapshot.text_base);
         assert_eq!(restored.text_mode, snapshot.text_mode);
+        assert_eq!(restored.text_alpha, Some(200));
         assert_eq!(restored.text_visible, snapshot.text_visible);
         assert_eq!(restored.vars, snapshot.vars);
         assert_eq!(restored.argument_base, 64);
         assert_eq!(restored.title_bytes, b"line");
-        assert_eq!(restored.version, 6);
+        assert_eq!(restored.version, 7);
         assert!(restored.resume_wait_click);
         assert_eq!(restored.sprites.len(), 1);
         let sprite = &restored.sprites[0];
@@ -19322,8 +19347,39 @@ mod tests {
         let older = decode_runtime_save_snapshot(&mut older_bytes.as_slice()).expect("read v2");
         assert_eq!(older.version, 2);
         assert!(!older.resume_wait_click);
+        assert_eq!(older.text_alpha, None, "a save without the field has no alpha");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restored_save_keeps_the_adv_window_alpha() {
+        let mut runtime = ScriptRuntime::boot(0x1000, ScriptRuntimeConfig::default());
+        runtime.text_state.alpha = 137;
+        let snapshot = runtime.capture_save_snapshot();
+        assert_eq!(snapshot.version, 7);
+        let mut bytes = encode_runtime_save_snapshot(&snapshot).expect("encode the save");
+        let decoded = decode_runtime_save_snapshot(&mut bytes.as_slice()).expect("decode the save");
+        assert_eq!(decoded.text_alpha, Some(137));
+
+        runtime.text_state.alpha = 0;
+        runtime.restore_save_snapshot(decoded);
+        assert_eq!(
+            runtime.text_state.alpha, 137,
+            "a restored ADV window keeps the opacity the save recorded"
+        );
+
+        // Saves written before the field existed leave the window shown: alpha
+        // 0 would paint the base panel away and drop the text onto the CG.
+        let mut legacy = RuntimeSaveSnapshot {
+            version: 6,
+            text_alpha: None,
+            ..RuntimeSaveSnapshot::default()
+        };
+        legacy.pc = 0x2000;
+        runtime.text_state.alpha = 0;
+        runtime.restore_save_snapshot(legacy);
+        assert_eq!(runtime.text_state.alpha, 255);
     }
 
     #[test]
