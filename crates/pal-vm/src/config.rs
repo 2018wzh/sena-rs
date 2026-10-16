@@ -220,6 +220,17 @@ impl TextLang {
         }
     }
 
+    /// Language named by a multi-language text-record field index, the inverse
+    /// of [`Self::field_index`]. Out-of-range values name no field.
+    pub fn from_field_index(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Jp),
+            1 => Some(Self::Cn),
+            2 => Some(Self::Tc),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Jp => "jp",

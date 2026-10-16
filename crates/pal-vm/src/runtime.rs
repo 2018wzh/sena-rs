@@ -1460,6 +1460,26 @@ impl ScriptRuntime {
         self.text_lang = lang;
     }
 
+    /// Switch the displayed text field of a multi-language release and refresh
+    /// everything already rendered from the previous field.
+    ///
+    /// The FHD releases join every language in one text record, so a language
+    /// change is visible immediately: the current ADV body re-typesets and the
+    /// backlog is measured again from the new field. Original single-language
+    /// pools carry no separator, so the switch leaves their text alone.
+    pub fn apply_text_language(&mut self, lang: TextLang) {
+        if self.text_lang == lang {
+            return;
+        }
+        self.set_text_lang(lang);
+        self.text_state.dirty = true;
+        // The body panel is rasterized once per text change; dropping the cache
+        // re-resolves and rebuilds it even if the text is hidden at the moment
+        // of the switch (a hidden window only clears `dirty`).
+        self.text_state.render_cache = None;
+        self.history_state.layout_cache = None;
+    }
+
     pub fn set_system_ini(&mut self, ini: IniFile) {
         let (width, height) = ini_graphics_size(
             Some(&ini),
@@ -5662,6 +5682,30 @@ impl ScriptRuntime {
                 if let Some(font_type) = args.first().copied() {
                     self.font_state.set_type(font_type.max(0) as u16);
                     self.system_state.set_language(font_type);
+                }
+                ExtCallOutcome::Value(1)
+            }
+            60 => {
+                // FHD release `set_language` (category 9 index 60, distinct
+                // from the PAL font type the index-17 call sets). The language
+                // row on the SYSTEM screen stores the picked text field in
+                // `mem_system[102]` and passes it here, and the boot path calls
+                // this once with that stored value. Only the localized fields
+                // are offered on screen (a Japanese install never calls this
+                // index at all), while a fresh install leaves the stored value
+                // at 0 — so 0 keeps the language the host configured
+                // (`--lang` / launcher) instead of resetting a localized
+                // release to its Japanese field.
+                let args = self.pop_ext_args(1);
+                let value = args.first().copied().unwrap_or(0);
+                if value != 0 {
+                    if let Some(lang) = TextLang::from_field_index(value) {
+                        log::debug!(
+                            "[trace-text] set_language field={value} -> {}",
+                            lang.as_str()
+                        );
+                        self.apply_text_language(lang);
+                    }
                 }
                 ExtCallOutcome::Value(1)
             }
@@ -18759,6 +18803,76 @@ mod tests {
         assert!(matches!(first, ExtCallOutcome::Value(1_000)));
         assert!(matches!(second, ExtCallOutcome::Value(1_088)));
         assert_eq!(runtime.stack, [42]);
+    }
+
+    /// Minimal asset set for extcalls that only consult runtime state.
+    fn empty_core_assets(multilingual: bool) -> (CoreAssets, PointTable) {
+        let empty_asset = |name: &str| LoadedAsset {
+            name: name.to_owned(),
+            bytes: Vec::new(),
+            source: AssetSource::Loose {
+                path: PathBuf::from(name),
+            },
+        };
+        let points = PointTable::parse(&[]).unwrap();
+        let assets = CoreAssets {
+            script: empty_asset("Script.src"),
+            file_dat: empty_asset("File.dat"),
+            text_dat: empty_asset("Text.dat"),
+            mem_dat: empty_asset("Mem.dat"),
+            point_dat: empty_asset("Point.dat"),
+            graphic_dat: None,
+            text_dat_multilingual: multilingual,
+            file_dat_layout: FileDatLayout::default(),
+            script_check_value: 0,
+            script_entry_pc: 12,
+            extended_softpal: false,
+            point_table: points.clone(),
+            graphic_index: None,
+        };
+        (assets, points)
+    }
+
+    #[test]
+    fn language_switch_extcall_selects_the_pressed_field() {
+        let (assets, points) = empty_core_assets(true);
+        let mut runtime = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        runtime.set_text_lang(TextLang::Cn);
+        // The SYSTEM language row passes the picked text field: 2 = traditional.
+        runtime.stack.push(2);
+        let outcome =
+            runtime.dispatch_extcall(9, 60, &[], &assets, &points, None, None, None, None, None);
+        assert!(matches!(outcome, ExtCallOutcome::Value(1)));
+        assert!(runtime.stack.is_empty(), "the field argument is consumed");
+        assert_eq!(runtime.text_lang, TextLang::Tc);
+        assert!(runtime.text_state.dirty, "the parked line re-typesets");
+    }
+
+    #[test]
+    fn unset_language_field_keeps_the_configured_language() {
+        let (assets, points) = empty_core_assets(true);
+        let mut runtime = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        runtime.set_text_lang(TextLang::Cn);
+        // A fresh install stores 0 in the script's setting and the boot path
+        // calls the extcall with it; the host's configured language stands.
+        runtime.stack.push(0);
+        let outcome =
+            runtime.dispatch_extcall(9, 60, &[], &assets, &points, None, None, None, None, None);
+        assert!(matches!(outcome, ExtCallOutcome::Value(1)));
+        assert!(runtime.stack.is_empty());
+        assert_eq!(runtime.text_lang, TextLang::Cn);
+    }
+
+    #[test]
+    fn text_language_field_index_round_trips() {
+        for lang in [TextLang::Jp, TextLang::Cn, TextLang::Tc] {
+            assert_eq!(
+                TextLang::from_field_index(lang.field_index() as i32),
+                Some(lang)
+            );
+        }
+        assert_eq!(TextLang::from_field_index(-1), None);
+        assert_eq!(TextLang::from_field_index(3), None);
     }
 
     #[test]
