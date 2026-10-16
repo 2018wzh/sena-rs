@@ -143,6 +143,8 @@ impl Engine {
                         config.nls,
                         Some(root),
                         config.font_file.as_deref(),
+                        config.lang,
+                        core_assets.text_dat_multilingual,
                     );
                     // Initialise the writable Mem.dat shadow used by MemDatDirect writes.
                     runtime.load_mem_dat(&core_assets.mem_dat.bytes);

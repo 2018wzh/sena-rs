@@ -1483,6 +1483,8 @@ impl ScriptRuntime {
         nls: Nls,
         root: Option<&Path>,
         font_file: Option<&Path>,
+        lang: TextLang,
+        text_dat_multilingual: bool,
     ) {
         let name = self
             .system_ini
@@ -1508,39 +1510,58 @@ impl ScriptRuntime {
             },
             Err(err) => log::debug!("[trace-text] PAL bitmap font {name:?} unavailable: {err}"),
         }
-        self.load_external_font(root, font_file);
+        let external = self.load_external_font(root, font_file, lang);
+        // A localized release ships the original `DEFAULT_FONT.DAT` and draws
+        // text with its own faces, so only leave the bitmap font in play when
+        // such a release supplied no face at all.
+        if text_dat_multilingual && external {
+            self.font_state.set_bitmap_text_enabled(false);
+        }
     }
 
-    /// Load a TrueType face shipped with the game data as the text fallback.
+    /// Load a TrueType face shipped with the game data as the text face.
     ///
     /// Releases that carry their CJK faces as loose `fonts/*.ttf` instead of
     /// extending `DEFAULT_FONT.DAT` need these faces for the glyphs the PAL
-    /// bitmap font and the embedded `default.ttf` do not cover. No face name is
-    /// baked in: the caller either names a file or the engine takes the first
-    /// `*.ttf` of the game's own `fonts` directory in sorted order.
-    fn load_external_font(&mut self, root: Option<&Path>, font_file: Option<&Path>) {
+    /// bitmap font and the embedded `default.ttf` do not cover, and the
+    /// localized releases draw their text from them outright. No face name is
+    /// baked in: the caller either names a file or the engine takes the face of
+    /// the game's own `fonts` directory that `lang` selects.
+    ///
+    /// Returns whether a face was loaded.
+    fn load_external_font(
+        &mut self,
+        root: Option<&Path>,
+        font_file: Option<&Path>,
+        lang: TextLang,
+    ) -> bool {
         let path = match font_file {
             Some(path) => Some(path.to_path_buf()),
-            None => root.and_then(discover_game_font),
+            None => root.and_then(|root| discover_game_font(root, lang)),
         };
         let Some(path) = path else {
-            return;
+            return false;
         };
         match std::fs::read(&path) {
             Ok(bytes) => {
                 if self.font_state.load_external_font(bytes) {
                     log::debug!("[trace-text] loaded external font {}", path.display());
+                    true
                 } else {
                     log::warn!(
                         "[trace-text] external font {} is not a usable TrueType face",
                         path.display()
                     );
+                    false
                 }
             }
-            Err(err) => log::warn!(
-                "[trace-text] external font {} is unreadable: {err}",
-                path.display()
-            ),
+            Err(err) => {
+                log::warn!(
+                    "[trace-text] external font {} is unreadable: {err}",
+                    path.display()
+                );
+                false
+            }
         }
     }
 
@@ -17848,8 +17869,8 @@ fn select_text_field(text: String, lang: TextLang, multilingual: bool) -> String
     }
 }
 
-/// First TrueType face of the game's own `fonts` directory, sorted by path.
-fn discover_game_font(root: &Path) -> Option<PathBuf> {
+/// TrueType face of the game's own `fonts` directory that `lang` selects.
+fn discover_game_font(root: &Path, lang: TextLang) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(root.join("fonts"))
         .ok()?
         .filter_map(|entry| entry.ok())
@@ -17862,6 +17883,27 @@ fn discover_game_font(root: &Path) -> Option<PathBuf> {
         })
         .collect();
     candidates.sort();
+    pick_face(candidates, lang)
+}
+
+/// Pick the face tagged for `lang`, falling back to the first one by path.
+///
+/// A release that carries several scripts tags them in the file name — this one
+/// ships `SourceHanSansCN-Medium` (Chinese) next to `SourceHanSans-Medium`
+/// (Japanese) — and its replaced `PAL.dll` picks its text face by the same tag.
+/// Traditional Chinese has no face of its own and uses the Chinese one. A
+/// single-face install has nothing to choose between.
+fn pick_face(candidates: Vec<PathBuf>, lang: TextLang) -> Option<PathBuf> {
+    if matches!(lang, TextLang::Cn | TextLang::Tc) {
+        let tagged = candidates.iter().find(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.to_ascii_lowercase().contains("cn"))
+        });
+        if let Some(tagged) = tagged {
+            return Some(tagged.clone());
+        }
+    }
     candidates.into_iter().next()
 }
 
@@ -18344,6 +18386,39 @@ enum StepResult {
 mod tests {
     use super::*;
     use crate::audio::AudioConfig;
+
+    #[test]
+    fn chinese_text_language_selects_the_face_tagged_for_it() {
+        let faces = |names: &[&str]| names.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let shipped = faces(&[
+            "fonts/SourceHanSans-Medium.ttf",
+            "fonts/SourceHanSansCN-Medium.ttf",
+            "fonts/SourceHanSerif-Medium.ttf",
+        ]);
+        // Traditional Chinese has no face of its own, so it shares the Chinese one.
+        for lang in [TextLang::Cn, TextLang::Tc] {
+            assert_eq!(
+                pick_face(shipped.clone(), lang),
+                Some(PathBuf::from("fonts/SourceHanSansCN-Medium.ttf"))
+            );
+        }
+        assert_eq!(
+            pick_face(shipped, TextLang::Jp),
+            Some(PathBuf::from("fonts/SourceHanSans-Medium.ttf"))
+        );
+    }
+
+    #[test]
+    fn a_fonts_directory_without_a_tagged_face_keeps_the_first_one() {
+        let only = vec![PathBuf::from("fonts/SomeSans.ttf")];
+        for lang in [TextLang::Jp, TextLang::Cn, TextLang::Tc] {
+            assert_eq!(
+                pick_face(only.clone(), lang),
+                Some(PathBuf::from("fonts/SomeSans.ttf"))
+            );
+        }
+        assert_eq!(pick_face(Vec::new(), TextLang::Cn), None);
+    }
 
     #[test]
     fn script_priority_cursor_layers_popup_over_existing_buttons() {

@@ -8,6 +8,10 @@ static DEFAULT_TTF_BYTES: &[u8] = include_bytes!("default.ttf");
 pub struct PalFontSystem {
     fallback: PalFontFallback,
     bitmap: Option<PalBitmapFont>,
+    /// Whether the PAL bitmap font may draw body text. A release that ships its
+    /// own TrueType faces draws text from those faces, and the bitmap font it
+    /// carries alongside is the original one.
+    bitmap_text_enabled: bool,
     begun: bool,
     font_size: u16,
     font_type: u16,
@@ -28,6 +32,7 @@ impl PalFontSystem {
         Self {
             fallback: PalFontFallback::default_ttf(),
             bitmap: None,
+            bitmap_text_enabled: true,
             begun: false,
             font_size: 28,
             font_type: 1,
@@ -121,9 +126,22 @@ impl PalFontSystem {
         }
     }
 
+    /// Keep the loaded PAL bitmap font out of body text.
+    ///
+    /// The localized releases carry the original `DEFAULT_FONT.DAT` unchanged
+    /// and take their text from the TrueType faces they ship instead, where
+    /// `DEF_FONT_TYPE` 4 selects that face rather than the bitmap font. Leaving
+    /// the bitmap in play would draw 28px original glyphs at the localized
+    /// `FONT_SIZE`, so lines it happens to cover would not match the rest.
+    /// `set_type` still accepts 4 either way, matching those releases' own
+    /// engine.
+    pub fn set_bitmap_text_enabled(&mut self, enabled: bool) {
+        self.bitmap_text_enabled = enabled;
+    }
+
     pub fn measure(&self, text: &str) -> (u32, u32) {
         let font_size = f32::from(self.font_size.max(1));
-        if self.font_type == 4 {
+        if self.font_type == 4 && self.bitmap_text_enabled {
             if let Some(bitmap) = &self.bitmap {
                 if bitmap.supports(text) {
                     return bitmap.measure_line(text, font_size);
@@ -137,6 +155,7 @@ impl PalFontSystem {
         let color = argb_to_bgra(self.color);
         let font_size = f32::from(self.font_size.max(1));
         let (width, height, mut pixels) = if self.font_type == 4
+            && self.bitmap_text_enabled
             && self.bitmap.as_ref().is_some_and(|font| font.supports(text))
         {
             self.bitmap
@@ -672,6 +691,29 @@ mod tests {
         let alpha = |x: usize, y: usize| pixels[(y * width as usize + x) * 4 + 3];
         assert_eq!(alpha(1, 22), 255);
         assert_eq!(alpha(2, 23), 128);
+    }
+
+    #[test]
+    fn localized_release_keeps_the_original_bitmap_font_out_of_body_text() {
+        let mut font = PalFontSystem::new();
+        font.load_bitmap_font(bitmap_font_fixture(), Nls::ShiftJis)
+            .unwrap();
+        font.set_type(4);
+        font.set_font_size(28);
+        font.set_effect(0);
+        let bitmap_metrics = {
+            let (width, height, _) = font.rasterize("A");
+            (width, height)
+        };
+        assert_eq!(bitmap_metrics, (4, 28));
+
+        font.set_bitmap_text_enabled(false);
+        let (width, height, _) = font.rasterize("A");
+        assert_ne!((width, height), bitmap_metrics);
+        assert_ne!(font.measure("A"), bitmap_metrics);
+        // The script still sees the font type it asked for.
+        assert!(font.set_type(4));
+        assert_eq!(font.font_type(), 4);
     }
 
     #[test]
