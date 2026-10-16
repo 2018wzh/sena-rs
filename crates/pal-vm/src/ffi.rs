@@ -10,6 +10,8 @@ use std::os::raw::{c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::str::FromStr;
+#[cfg(target_os = "android")]
+use std::sync::Once;
 use std::time::Duration;
 
 use pal_asset::Nls;
@@ -232,10 +234,19 @@ pub unsafe extern "C" fn sena_host_create(
             return ptr::null_mut();
         }
     };
+    let nls = nls_from_cstr(nls_utf8);
+    let lang = lang_from_cstr(lang_utf8);
+    init_android_diagnostics();
+    log::info!(
+        "sena_host_create: root={} nls={nls:?} lang={lang:?} surface={}x{}",
+        game_root.display(),
+        width.max(1),
+        height.max(1)
+    );
     let mut config = crate::SenaConfig {
         game_root: Some(game_root),
-        nls: nls_from_cstr(nls_utf8),
-        lang: lang_from_cstr(lang_utf8),
+        nls,
+        lang,
         width: width.max(1),
         height: height.max(1),
         prefer_config_window_size: true,
@@ -244,10 +255,19 @@ pub unsafe extern "C" fn sena_host_create(
     config.renderer.virtual_width = width.max(1);
     config.renderer.virtual_height = height.max(1);
 
-    let mut engine = match build_engine(&config) {
-        Ok(engine) => engine,
-        Err(err) => {
+    // A panic inside the engine or one of its dependencies would unwind out of
+    // this `extern "C"` function and abort the process, leaving the host with
+    // nothing to report. Catch it so a failed create stays an ordinary error.
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_engine(&config)));
+    let mut engine = match built {
+        Ok(Ok(engine)) => engine,
+        Ok(Err(err)) => {
             eprintln!("sena_host_create failed: {err:?}");
+            return ptr::null_mut();
+        }
+        Err(_) => {
+            // The panic hook installed above has already logged the message.
+            eprintln!("sena_host_create panicked");
             return ptr::null_mut();
         }
     };
@@ -275,15 +295,23 @@ pub extern "C" fn sena_host_step(handle: *mut c_void, dt_ms: u32) -> i32 {
         return 2;
     };
     host.engine.handle_event(PalEvent::RedrawRequested);
-    let frame = match host
-        .engine
-        .update_with_delta(Duration::from_millis(dt_ms.max(1).min(250) as u64))
-    {
-        Ok(frame) => frame,
-        Err(err) => {
+    let updated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        host.engine
+            .update_with_delta(Duration::from_millis(dt_ms.max(1).min(250) as u64))
+    }));
+    let frame = match updated {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(err)) => {
             eprintln!("sena_host_step failed: {err:?}");
             host.last_status = 2;
             host.engine.input_begin_frame();
+            return 2;
+        }
+        Err(_) => {
+            // A panic mid-frame leaves the engine in an unknown state; stop the
+            // run the way any other step failure does instead of aborting.
+            eprintln!("sena_host_step panicked");
+            host.last_status = 2;
             return 2;
         }
     };
@@ -402,8 +430,62 @@ pub extern "C" fn android_main(_app: *mut c_void) {
     );
 }
 
+/// Installs the logcat logger and the panic hook, once per process.
+///
+/// Android throws a library's stdout and stderr away, so without this a panic
+/// reaches the developer as nothing but a SIGABRT tombstone and every
+/// `log::warn!` in the engine is lost. The desktop hosts keep their own logger
+/// (`env_logger` in the CLI), so this is Android-only.
+#[cfg(target_os = "android")]
+fn init_android_diagnostics() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_tag("sena")
+                .with_max_level(log::LevelFilter::Info),
+        );
+        std::panic::set_hook(Box::new(|info| {
+            log::error!("panic: {info}");
+        }));
+    });
+}
+
+#[cfg(not(target_os = "android"))]
+fn init_android_diagnostics() {}
+
+/// Registers the JNI handles the audio backend reaches the platform through.
+///
+/// `cpal`'s AAudio host calls `ndk_context::android_context()`, which panics
+/// until the context is registered; that panic unwinds out of `extern "C"` and
+/// aborts the process, so the first SOUND init took the whole player down with
+/// it. `platform/android/app/src/main/cpp/sena_jni.cpp` passes the `JavaVM` and
+/// a global reference to the application context.
 #[no_mangle]
-pub extern "C" fn sena_android_init_context(_java_vm_ptr: *mut c_void, _context_ptr: *mut c_void) {}
+pub extern "C" fn sena_android_init_context(java_vm_ptr: *mut c_void, context_ptr: *mut c_void) {
+    init_android_diagnostics();
+
+    #[cfg(target_os = "android")]
+    {
+        if java_vm_ptr.is_null() || context_ptr.is_null() {
+            log::warn!(
+                "sena_android_init_context: null JavaVM or context; audio backends cannot start"
+            );
+            return;
+        }
+        // `initialize_android_context` asserts it is only called once.
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| unsafe {
+            ndk_context::initialize_android_context(java_vm_ptr, context_ptr);
+        });
+        log::info!("sena_android_init_context: registered the Android context");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (java_vm_ptr, context_ptr);
+    }
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn sena_android_create(
