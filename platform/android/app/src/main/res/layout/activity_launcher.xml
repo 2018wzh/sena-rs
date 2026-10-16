@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/launcher_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
@@ -8,11 +9,14 @@
     <!-- A phone in portrait cannot hold the import button and both selectors in
          one row: with fixed-width spinners the row was wider than the screen,
          so the button and the language value were clipped at the edges. The
-         button sits on its own line and the spinners share the row by weight. -->
+         button sits on its own line, centred, and the spinners share the row
+         below it by weight. The status bar inset is added to the padding in
+         code, because edge-to-edge is forced from targetSdk 35 on. -->
     <Button
         android:id="@+id/btn_import"
         android:layout_width="wrap_content"
         android:layout_height="40dp"
+        android:layout_gravity="center_horizontal"
         android:minHeight="0dp"
         android:text="Import" />
 

@@ -18,6 +18,10 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.app.AlertDialog;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -46,6 +50,18 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
         super.onCreate(savedInstanceState);
 
         setContentView(R.layout.activity_launcher);
+
+        // Edge-to-edge is forced from targetSdk 35 on, so the header used to be
+        // drawn under the status bar (the clock sat on the import button). Keep
+        // the bars transparent but push the content clear of them.
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        final int basePadding = Math.round(12f * getResources().getDisplayMetrics().density);
+        View root = findViewById(R.id.launcher_root);
+        ViewCompat.setOnApplyWindowInsetsListener(root, (v, windowInsets) -> {
+            Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
+            v.setPadding(basePadding, basePadding + bars.top, basePadding, basePadding + bars.bottom);
+            return windowInsets;
+        });
 
         library = new GameLibrary(this);
 
