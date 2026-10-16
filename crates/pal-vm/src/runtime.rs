@@ -10560,19 +10560,32 @@ impl ScriptRuntime {
             }
         };
         let (logical_width, logical_height) = self.logical_size();
+        let project_native_draw = should_project_game_sprite_native_draw(arg_count, decoded.height);
+        // The FHD standing images are authored at 2.84x the native stage height
+        // (the JP art is 2048 tall in a 720 stage, the CN art 3072 in a 1080
+        // stage).  PAL.dll's draw scales the source rectangle, so the wrapper's
+        // placement helpers see the fitted size: `sub_423550`/`sub_423600` read
+        // `PalSpriteGetInfo`, and only a fitted size makes `mode_y == 2`
+        // bottom-align a full-body standing sprite instead of parking the head
+        // 1992 pixels above the stage.  The script's scale lane and the
+        // `sp_set_pos_move` deltas live in that same fitted space.
+        let native_fit = if project_native_draw {
+            native_sprite_fit_scale(decoded.height)
+        } else {
+            1.0
+        };
         let (mut native_x, mut native_y, native_z) = native_place_sprite(
             arg_count,
             raw_x,
             raw_y,
             raw_z,
-            decoded.width,
-            decoded.height,
+            ((decoded.width as f32) * native_fit).round().max(1.0) as u32,
+            ((decoded.height as f32) * native_fit).round().max(1.0) as u32,
             decoded.offset_x,
             decoded.offset_y,
             logical_width,
             logical_height,
         );
-        let project_native_draw = should_project_game_sprite_native_draw(arg_count, decoded.height);
         if arg_count < 5 && !project_native_draw && raw_x != 0xFFFF && raw_y != 0xFFFF {
             let (logical_x, logical_y, _) = place_sprite(
                 arg_count,
@@ -10601,7 +10614,12 @@ impl ScriptRuntime {
         };
         let project_native_draw = initial_visual.project_native_draw;
         let (x, y, z, scale) = if project_native_draw {
-            (native_x, native_y, native_z, pal_scale_to_factor(100))
+            (
+                native_x,
+                native_y,
+                native_z,
+                pal_scale_to_factor(100) * native_fit,
+            )
         } else {
             render_from_native_wrapper(initial_visual, logical_width, logical_height)
         };
@@ -10625,7 +10643,11 @@ impl ScriptRuntime {
         desc.cell_height = decoded.cell_height;
         desc.position = PalVec3::from_f32(x, y, z);
         desc.scale = scale;
-        desc.center_scale = true;
+        // The native draw centers a scale-only sprite on its source rectangle;
+        // with the fitted standing-art scale that centering would push the
+        // sprite thousands of pixels off the stage, so the fitted size anchors
+        // at the placement position the wrapper computed.
+        desc.center_scale = !project_native_draw;
         desc.native_projection = project_native_draw.then_some((
             logical_width.max(1) as f32 / 1920.0,
             logical_height.max(1) as f32 / 1080.0,
@@ -12336,7 +12358,7 @@ impl ScriptRuntime {
                 visual.native_x,
                 visual.native_y,
                 visual.native_z,
-                pal_scale_to_factor(visual.raw_scale),
+                pal_scale_to_factor(visual.raw_scale) * native_sprite_fit_scale(visual.height),
             )
         } else {
             render_from_native_wrapper(visual, logical_width, logical_height)
@@ -13284,7 +13306,8 @@ impl ScriptRuntime {
                 next_visual.native_x,
                 next_visual.native_y,
                 next_visual.native_z,
-                pal_scale_to_factor(next_visual.raw_scale),
+                pal_scale_to_factor(next_visual.raw_scale)
+                    * native_sprite_fit_scale(next_visual.height),
             )
         } else {
             render_from_native_wrapper(next_visual, logical_width, logical_height)
@@ -13309,7 +13332,10 @@ impl ScriptRuntime {
         desc.cell_height = decoded.cell_height;
         desc.position = PalVec3::from_f32(x, y, z);
         desc.scale = render_scale;
-        desc.center_scale = true;
+        // Same anchoring rule as the initial placement: a fitted standing
+        // sprite is anchored at the wrapper position instead of being centered
+        // on its full-resolution source rectangle.
+        desc.center_scale = !project_native_draw;
         desc.native_projection = project_native_draw.then_some((
             logical_width.max(1) as f32 / 1920.0,
             logical_height.max(1) as f32 / 1080.0,
@@ -13366,8 +13392,21 @@ impl ScriptRuntime {
             let new_rect_height = i32::try_from(decoded.cell_height.max(1)).unwrap_or(i32::MAX);
             let old_rect_width = old_rect.width().max(1);
             let old_rect_height = old_rect.height().max(1);
-            let adjust_x = (new_rect_width.saturating_sub(old_rect_width)) / 2;
-            let adjust_y = (new_rect_height.saturating_sub(old_rect_height)) / 2;
+            // The centering delta is a size delta in the art's own pixel space,
+            // so it takes the same fit as the placement when the wrapper path is
+            // active.
+            let rect_fit = if project_native_draw {
+                native_sprite_fit_scale(decoded.height)
+            } else {
+                1.0
+            };
+            let adjust_x =
+                (((new_rect_width.saturating_sub(old_rect_width)) as f32) * 0.5 * rect_fit).round()
+                    as i32;
+            let adjust_y = (((new_rect_height.saturating_sub(old_rect_height)) as f32)
+                * 0.5
+                * rect_fit)
+                .round() as i32;
             if adjust_x != 0 || adjust_y != 0 {
                 // Game.exe sub_428F10 calls PalSpriteGetRect on the old and
                 // newly loaded PAL sprites, then subtracts half of the rect
@@ -13382,7 +13421,8 @@ impl ScriptRuntime {
                         next_visual.native_x,
                         next_visual.native_y,
                         next_visual.native_z,
-                        pal_scale_to_factor(next_visual.raw_scale),
+                        pal_scale_to_factor(next_visual.raw_scale)
+                            * native_sprite_fit_scale(next_visual.height),
                     )
                 } else {
                     render_from_native_wrapper(next_visual, logical_width, logical_height)
@@ -16417,10 +16457,26 @@ fn should_project_game_sprite_native_draw(arg_count: usize, height: u32) -> bool
 
 fn native_delta_for_visual(visual: GameSpriteWrapperVisual, x: i32, y: i32) -> (f32, f32) {
     if visual.uses_native_placement_deltas() {
-        (x as f32, y as f32)
+        // The wrapper's `sp_set_pos_move` deltas are authored in the standing
+        // art's own pixel space, so they take the same fit as the art size.
+        let fit = native_sprite_fit_scale(visual.height);
+        (x as f32 * fit, y as f32 * fit)
     } else {
         (native_delta_x(x), native_delta_y(y))
     }
+}
+
+/// Shrink-only fit that maps a tall standing image onto the native 1920x1080
+/// wrapper stage.  PAL.dll draws `source_rect * scale`, and the FHD releases
+/// re-author the original 2048-tall standing art at 3072 (an exact 1.5x), so a
+/// sprite taller than the stage has to be fitted before the script's scale lane
+/// applies.  Anything at or below the stage height is returned unscaled, which
+/// keeps full-screen backgrounds, event CGs and UI art untouched.
+fn native_sprite_fit_scale(height: u32) -> f32 {
+    if height == 0 {
+        return 1.0;
+    }
+    (1080.0 / height as f32).min(1.0)
 }
 
 fn scale_script_x(value: i32, logical_width: u32) -> i32 {
