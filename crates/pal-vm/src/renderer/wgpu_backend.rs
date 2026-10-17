@@ -100,9 +100,16 @@ struct DrawSpan {
     first_vertex: u32,
 }
 
+struct OffscreenTarget {
+    texture: wgpu::Texture,
+    buffer: wgpu::Buffer,
+    stride: u32,
+    completion: Arc<std::sync::Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>,
+}
+
 pub struct WgpuBackend {
     surface: Option<wgpu::Surface<'static>>,
-    offscreen: Option<(wgpu::Texture, wgpu::Buffer, u32)>,
+    offscreen: Option<OffscreenTarget>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -371,7 +378,7 @@ impl WgpuBackend {
     }
 
     fn offscreen_target(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration)
-        -> (wgpu::Texture, wgpu::Buffer, u32)
+        -> OffscreenTarget
     {
         let stride = (config.width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -391,12 +398,12 @@ impl WgpuBackend {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        (texture, buffer, stride)
+        OffscreenTarget { texture, buffer, stride, completion: Arc::new(std::sync::Mutex::new(None)) }
     }
 
     /// Copy the complete GPU-composited image into caller-owned reusable storage.
-    pub fn read_rgba(&self, pixels: &mut Vec<u8>) -> anyhow::Result<()> {
-        let (texture, buffer, stride) = self.offscreen.as_ref()
+    pub fn read_rgba(&mut self, pixels: &mut Vec<u8>) -> anyhow::Result<()> {
+        let OffscreenTarget { texture, buffer, stride, completion } = self.offscreen.as_ref()
             .ok_or_else(|| anyhow::anyhow!("readback requires an offscreen endpoint"))?;
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         encoder.copy_texture_to_buffer(
@@ -408,10 +415,19 @@ impl WgpuBackend {
             wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
         );
         self.queue.submit([encoder.finish()]);
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| { let _ = sender.send(result); });
-        self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None })?;
-        receiver.recv()??;
+        *completion.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        let mapped_result = Arc::clone(completion);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            *mapped_result.lock().unwrap_or_else(|error| error.into_inner()) = Some(result);
+        });
+        if let Err(error) = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None, timeout: Some(std::time::Duration::from_secs(5)),
+        }) {
+            buffer.unmap();
+            return Err(error.into());
+        }
+        completion.lock().unwrap_or_else(|error| error.into_inner()).take()
+            .ok_or_else(|| anyhow::anyhow!("GPU readback did not complete"))??;
         let mapped = buffer.slice(..).get_mapped_range();
         let row = self.config.width as usize * 4;
         pixels.resize(row * self.config.height as usize, 0);
@@ -585,7 +601,7 @@ impl WgpuBackend {
         };
         let texture = match &frame {
             Some(frame) => &frame.texture,
-            None => &self.offscreen.as_ref().expect("offscreen endpoint").0,
+            None => &self.offscreen.as_ref().expect("offscreen endpoint").texture,
         };
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let clear = scene_clear_color(scene, fallback_clear);
