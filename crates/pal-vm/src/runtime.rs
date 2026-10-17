@@ -267,6 +267,7 @@ pub enum WaitRequest {
 pub struct ScriptRuntime {
     pc: u32,
     entry_pc: u32,
+    load_generation: u64,
     vars: Vec<i32>,
     stack: Vec<i32>,
     argument_stack: Vec<i32>,
@@ -1364,6 +1365,7 @@ impl ScriptRuntime {
         Self {
             pc: entry_pc,
             entry_pc,
+            load_generation: 0,
             vars: vec![0; DEFAULT_VAR_COUNT],
             stack: Vec::new(),
             argument_stack: Vec::new(),
@@ -1859,6 +1861,15 @@ impl ScriptRuntime {
 
     pub fn status(&self) -> &RuntimeStatus {
         &self.status
+    }
+
+    /// Changes only after a native save has actually been restored.
+    pub fn load_generation(&self) -> u64 {
+        self.load_generation
+    }
+
+    pub fn system_state_mut(&mut self) -> &mut PalSystemState {
+        &mut self.system_state
     }
 
     pub fn parsed_system_ini(&self) -> Option<&IniFile> {
@@ -13874,6 +13885,7 @@ impl ScriptRuntime {
     }
 
     fn restore_save_snapshot(&mut self, snapshot: RuntimeSaveSnapshot) {
+        self.load_generation = self.load_generation.saturating_add(1);
         self.pc = snapshot.pc;
         self.call_stack = snapshot.call_stack;
         install_i32_words(&mut self.user_mem, &snapshot.user_mem, DEFAULT_MEM_SIZE);

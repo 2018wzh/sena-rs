@@ -101,7 +101,8 @@ struct DrawSpan {
 }
 
 pub struct WgpuBackend {
-    surface: wgpu::Surface<'static>,
+    surface: Option<wgpu::Surface<'static>>,
+    offscreen: Option<(wgpu::Texture, wgpu::Buffer, u32)>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -117,14 +118,23 @@ pub struct WgpuBackend {
 
 impl WgpuBackend {
     pub async fn new(window: Arc<Window>, size: PhysicalSize<u32>) -> anyhow::Result<Self> {
+        Self::create(Some(window), size).await
+    }
+
+    /// The ordinary GPU renderer, with a texture endpoint instead of a window.
+    pub async fn new_offscreen(size: PhysicalSize<u32>) -> anyhow::Result<Self> {
+        Self::create(None, size).await
+    }
+
+    async fn create(window: Option<Arc<Window>>, size: PhysicalSize<u32>) -> anyhow::Result<Self> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let surface = instance.create_surface(window)?;
+        let surface = window.map(|window| instance.create_surface(window)).transpose()?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
+                compatible_surface: surface.as_ref(),
             })
             .await
             .map_err(|err| anyhow::anyhow!("no compatible GPU adapter: {err}"))?;
@@ -132,10 +142,9 @@ impl WgpuBackend {
             .request_device(&wgpu::DeviceDescriptor::default())
             .await
             .map_err(|err| anyhow::anyhow!("GPU device request failed: {err}"))?;
-        let capabilities = surface.get_capabilities(&adapter);
-        // Prefer non-sRGB formats so blending matches the software compositor
-        // (which blends the already-sRGB-encoded scene values directly).
-        let format = capabilities
+        let capabilities = surface.as_ref().map(|surface| surface.get_capabilities(&adapter));
+        // Preserve encoded-value blending for both presentation endpoints.
+        let format = capabilities.as_ref().map(|capabilities| capabilities
             .formats
             .iter()
             .copied()
@@ -152,7 +161,7 @@ impl WgpuBackend {
                     .copied()
                     .find(|format| !format.is_srgb())
             })
-            .unwrap_or(capabilities.formats[0]);
+            .unwrap_or(capabilities.formats[0])).unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -160,10 +169,17 @@ impl WgpuBackend {
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
-            alpha_mode: capabilities.alpha_modes[0],
+            alpha_mode: capabilities.as_ref().map_or(wgpu::CompositeAlphaMode::Opaque, |caps| caps.alpha_modes[0]),
             view_formats: vec![],
         };
-        surface.configure(&device, &config);
+        if let Some(surface) = &surface {
+            surface.configure(&device, &config);
+        }
+        let offscreen = if surface.is_none() {
+            Some(Self::offscreen_target(&device, &config))
+        } else {
+            None
+        };
 
         let sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pal nearest sampler"),
@@ -298,6 +314,7 @@ impl WgpuBackend {
         );
         Ok(Self {
             surface,
+            offscreen,
             device,
             queue,
             config,
@@ -342,11 +359,68 @@ impl WgpuBackend {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.reconfigure();
     }
 
     fn reconfigure(&mut self) {
-        self.surface.configure(&self.device, &self.config);
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+        } else {
+            self.offscreen = Some(Self::offscreen_target(&self.device, &self.config));
+        }
+    }
+
+    fn offscreen_target(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration)
+        -> (wgpu::Texture, wgpu::Buffer, u32)
+    {
+        let stride = (config.width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pal offscreen final frame"),
+            size: wgpu::Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pal final frame readback"),
+            size: u64::from(stride) * u64::from(config.height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        (texture, buffer, stride)
+    }
+
+    /// Copy the complete GPU-composited image into caller-owned reusable storage.
+    pub fn read_rgba(&self, pixels: &mut Vec<u8>) -> anyhow::Result<()> {
+        let (texture, buffer, stride) = self.offscreen.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("readback requires an offscreen endpoint"))?;
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
+                buffer,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(*stride), rows_per_image: Some(self.config.height) },
+            },
+            wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| { let _ = sender.send(result); });
+        self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None })?;
+        receiver.recv()??;
+        let mapped = buffer.slice(..).get_mapped_range();
+        let row = self.config.width as usize * 4;
+        pixels.resize(row * self.config.height as usize, 0);
+        for (dst, src) in pixels.chunks_exact_mut(row).zip(mapped.chunks_exact(*stride as usize)) {
+            dst.copy_from_slice(&src[..row]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        Ok(())
     }
 
     fn sync_textures(&mut self, scene: &FrameScene) {
@@ -491,23 +565,29 @@ impl WgpuBackend {
             self.queue
                 .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
         }
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                self.reconfigure();
-                return Ok(RenderOutcome::Reconfigured);
-            }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(RenderOutcome::Skipped);
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                anyhow::bail!("surface validation error while acquiring the next frame");
-            }
+        let frame = if let Some(surface) = &self.surface {
+            Some(match surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(frame)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+                wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                    self.reconfigure();
+                    return Ok(RenderOutcome::Reconfigured);
+                }
+                wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                    return Ok(RenderOutcome::Skipped);
+                }
+                wgpu::CurrentSurfaceTexture::Validation => {
+                    anyhow::bail!("surface validation error while acquiring the next frame");
+                }
+            })
+        } else {
+            None
         };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let texture = match &frame {
+            Some(frame) => &frame.texture,
+            None => &self.offscreen.as_ref().expect("offscreen endpoint").0,
+        };
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let clear = scene_clear_color(scene, fallback_clear);
         let mut encoder = self
             .device
@@ -553,7 +633,9 @@ impl WgpuBackend {
             }
         }
         self.queue.submit([encoder.finish()]);
-        frame.present();
+        if let Some(frame) = frame {
+            frame.present();
+        }
         Ok(RenderOutcome::Rendered)
     }
 

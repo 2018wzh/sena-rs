@@ -30,5 +30,18 @@ Specifically, targeted for the game "Koikake".
 cargo run -p pal-vm --release --bin sena -- /path/to/game --nls sjis
 ```
 
+## Library presentation and lifetime
+
+`Engine` owns PAL execution, movies, native Kira audio, game menus and portable saves.
+`renderer::WgpuBackend::new_offscreen` uses the same GPU compositor as the windowed
+application; `read_rgba` copies its final image into reusable caller-owned storage.
+It creates no window or event loop. Input coordinates must use that raster's size.
+
+`AudioSystem::suspend` / `unsuspend` preserve script-paused channels. A caller that
+pauses engine scheduling must also suspend audio and discard paused wall time.
+`ScriptRuntime::load_generation` identifies successful native save restores.
+Platform owners drain `system_state_mut().take_window_requests()` and confirm actual
+geometry with `confirm_window_geometry`; this never changes the renderer size.
+
 ## License
 This project is licensed under the MPL-2.0 License. See [LICENSE](./LICENSE-MPL-2.0) for details.

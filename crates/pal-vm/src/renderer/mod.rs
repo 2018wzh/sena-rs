@@ -17,7 +17,7 @@ mod shader;
 mod wgpu_backend;
 
 pub use shader::{shader_source, ShaderProgram};
-use wgpu_backend::WgpuBackend;
+pub use wgpu_backend::WgpuBackend;
 
 #[derive(Clone, Copy, Debug)]
 pub struct RendererConfig {

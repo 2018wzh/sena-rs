@@ -227,6 +227,10 @@ impl Engine {
         self.runtime.as_ref()
     }
 
+    pub fn runtime_mut(&mut self) -> Option<&mut ScriptRuntime> {
+        self.runtime.as_mut()
+    }
+
     pub fn runtime_status(&self) -> &RuntimeStatus {
         &self.last_runtime_status
     }
@@ -323,6 +327,11 @@ impl Engine {
     /// Clear per-frame transient input state after the current frame has consumed it.
     pub fn input_begin_frame(&mut self) {
         self.input.begin_frame();
+    }
+
+    /// Release held buttons when the platform loses focus or a context is replaced.
+    pub fn clear_input(&mut self) {
+        self.input = PalInputState::new();
     }
 
     pub fn handle_event(&mut self, event: PalEvent) {
@@ -507,6 +516,7 @@ impl Engine {
                     Err(e) => {
                         log::error!("runtime error: {e}");
                         runtime.set_faulted(format!("{e}"));
+                        self.last_runtime_status = runtime.status().clone();
                         None
                     }
                 }

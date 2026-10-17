@@ -25,6 +25,7 @@ pub struct AudioSystem {
     groups: BTreeMap<PalSoundGroup, Vec<AudioSlot>>,
     primary_volume: PalVolume,
     group_volumes: BTreeMap<PalSoundGroup, PalVolume>,
+    suspended_sounds: Vec<AudioHandle>,
 }
 
 impl AudioSystem {
@@ -57,11 +58,39 @@ impl AudioSystem {
             groups,
             primary_volume: PalVolume::MAX,
             group_volumes,
+            suspended_sounds: Vec::new(),
         })
     }
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Suspend only playing channels; script-paused sounds stay paused on resume.
+    pub fn suspend(&mut self) {
+        if !self.suspended_sounds.is_empty() {
+            return;
+        }
+        for (&group, slots) in &mut self.groups {
+            for (index, slot) in slots.iter_mut().enumerate() {
+                if let Some(sound) = &mut slot.handle {
+                    if matches!(sound.state(), PlaybackState::Playing | PlaybackState::Resuming) {
+                        sound.pause(Tween { duration: std::time::Duration::ZERO, ..Tween::default() });
+                        self.suspended_sounds.push(AudioHandle::new(group, index));
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn unsuspend(&mut self) {
+        while let Some(handle) = self.suspended_sounds.pop() {
+            if let Ok(slot) = self.slot_mut(handle) {
+                if let Some(sound) = &mut slot.handle {
+                    sound.resume(Tween { duration: std::time::Duration::ZERO, ..Tween::default() });
+                }
+            }
+        }
     }
 
     pub fn load_static_from_resource(

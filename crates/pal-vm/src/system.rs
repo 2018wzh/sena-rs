@@ -258,6 +258,7 @@ impl PalSystemState {
 
     pub fn set_hide_cursor_time(&mut self, time: i32) -> i32 {
         self.hide_cursor_time = time.max(0);
+        self.window_requests.push(PalWindowRequest::CursorHideTime { time: self.hide_cursor_time });
         1
     }
 
@@ -267,6 +268,7 @@ impl PalSystemState {
 
     pub fn set_cursor_null(&mut self, enabled: bool) -> i32 {
         self.cursor_null = enabled;
+        self.window_requests.push(PalWindowRequest::CursorVisibility { visible: !enabled });
         1
     }
 
@@ -416,6 +418,16 @@ impl PalSystemState {
     pub fn take_window_requests(&mut self) -> Vec<PalWindowRequest> {
         std::mem::take(&mut self.window_requests)
     }
+
+    /// Confirm platform geometry without emitting another platform request.
+    pub fn confirm_window_geometry(&mut self, mode: i32, x: i32, y: i32, width: i32, height: i32) {
+        self.window_mode = mode;
+        self.window_pos = (x, y);
+        self.window_size = (width.max(1), height.max(1));
+        let rect = PalRectI::new(0, 0, width.max(1), height.max(1));
+        self.windowed_content_rect = rect;
+        self.fullscreen_content_rect = rect;
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -482,6 +494,8 @@ pub enum PalWindowRequest {
     ChangeAspect { mode: i32 },
     ChangeSize { width: i32, height: i32 },
     SetPos { x: i32, y: i32 },
+    CursorVisibility { visible: bool },
+    CursorHideTime { time: i32 },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
