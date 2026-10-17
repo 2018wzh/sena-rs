@@ -70,8 +70,16 @@ public final class SenaGameActivity extends AppCompatActivity
     private Bitmap frameBitmap = null;
     private int[] framePixels = null;
 
+    /** Where the letterboxed frame lands inside the surface. */
+    private final Rect contentRect = new Rect();
+    private int surfaceWidth = 0;
+    private int surfaceHeight = 0;
+    private int reportedContentWidth = 0;
+    private int reportedContentHeight = 0;
+
     private String gameRoot;
     private String nlsValue = NlsOption.SHIFT_JIS.value;
+    private String langValue = LangOption.DEFAULT.value;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -90,6 +98,7 @@ public final class SenaGameActivity extends AppCompatActivity
         }
         gameRoot = p.gameRoot;
         nlsValue = p.nls;
+        langValue = p.lang;
 
         surfaceView.getHolder().addCallback(this);
         surfaceView.setOnTouchListener(this);
@@ -144,8 +153,11 @@ public final class SenaGameActivity extends AppCompatActivity
             ensureEngine(holder);
         } else {
             // SurfaceChanged fires frequently (format/size). Avoid recreating the WGPU surface here;
-            // just resize the existing swapchain. Surface recreation is handled by surfaceCreated/Destroyed.
-            NativeSena.resize(handle, width, height);
+            // just re-letterbox the existing swapchain. Surface recreation is handled by
+            // surfaceCreated/Destroyed.
+            surfaceWidth = Math.max(1, width);
+            surfaceHeight = Math.max(1, height);
+            updateContentRect();
         }
     }
 
@@ -180,7 +192,7 @@ public final class SenaGameActivity extends AppCompatActivity
             h = Math.max(1, surfaceView.getHeight());
         }
 
-        long hnd = NativeSena.create(holder.getSurface(), w, h, scale, gameRoot, nlsValue);
+        long hnd = NativeSena.create(holder.getSurface(), w, h, scale, gameRoot, nlsValue, langValue);
         if (hnd == 0) {
             Toast.makeText(this, "Failed to create engine", Toast.LENGTH_LONG).show();
             finish();
@@ -189,6 +201,11 @@ public final class SenaGameActivity extends AppCompatActivity
         handle = hnd;
         sActivitiesByHandle.put(handle, new WeakReference<>(this));
         NativeSena.setNativeMessageboxCallback(handle);
+        surfaceWidth = Math.max(1, w);
+        surfaceHeight = Math.max(1, h);
+        reportedContentWidth = 0;
+        reportedContentHeight = 0;
+        updateContentRect();
     }
 
     private void destroyEngine() {
@@ -196,6 +213,8 @@ public final class SenaGameActivity extends AppCompatActivity
             sActivitiesByHandle.remove(handle);
             NativeSena.destroy(handle);
             handle = 0;
+            reportedContentWidth = 0;
+            reportedContentHeight = 0;
         }
     }
 
@@ -243,6 +262,32 @@ public final class SenaGameActivity extends AppCompatActivity
         Choreographer.getInstance().postFrameCallback(this);
     }
 
+    /**
+     * Fit the engine frame inside the surface without changing its aspect ratio,
+     * and report the content size to the engine so the touch mapping matches what
+     * is on screen. A phone that is wider than the game's 16:9 keeps black bars
+     * on the sides instead of stretching the picture.
+     */
+    private void updateContentRect() {
+        int frameWidth = handle != 0 ? NativeSena.frameWidth(handle) : 0;
+        int frameHeight = handle != 0 ? NativeSena.frameHeight(handle) : 0;
+        if (frameWidth <= 0 || frameHeight <= 0 || surfaceWidth <= 0 || surfaceHeight <= 0) {
+            contentRect.set(0, 0, Math.max(1, surfaceWidth), Math.max(1, surfaceHeight));
+            return;
+        }
+        double scale = Math.min((double) surfaceWidth / frameWidth, (double) surfaceHeight / frameHeight);
+        int width = Math.max(1, (int) Math.round(frameWidth * scale));
+        int height = Math.max(1, (int) Math.round(frameHeight * scale));
+        int left = (surfaceWidth - width) / 2;
+        int top = (surfaceHeight - height) / 2;
+        contentRect.set(left, top, left + width, top + height);
+        if (handle != 0 && (width != reportedContentWidth || height != reportedContentHeight)) {
+            reportedContentWidth = width;
+            reportedContentHeight = height;
+            NativeSena.resize(handle, width, height);
+        }
+    }
+
     private void drawLatestFrame() {
         if (handle == 0 || surfaceView == null) {
             return;
@@ -277,9 +322,11 @@ public final class SenaGameActivity extends AppCompatActivity
             if (canvas == null) {
                 return;
             }
-            Rect dst = new Rect(0, 0, canvas.getWidth(), canvas.getHeight());
+            surfaceWidth = Math.max(1, canvas.getWidth());
+            surfaceHeight = Math.max(1, canvas.getHeight());
+            updateContentRect();
             canvas.drawColor(android.graphics.Color.BLACK);
-            canvas.drawBitmap(frameBitmap, null, dst, null);
+            canvas.drawBitmap(frameBitmap, null, contentRect, null);
             lastFrameGeneration = gen;
         } finally {
             if (canvas != null) {
@@ -315,8 +362,12 @@ public final class SenaGameActivity extends AppCompatActivity
                 return false;
         }
 
-        double x = e.getX();
-        double y = e.getY();
+        // The frame is letterboxed inside the surface, so report the touch position
+        // in the content rect the engine was told about.
+        int contentWidth = Math.max(1, contentRect.width());
+        int contentHeight = Math.max(1, contentRect.height());
+        double x = Math.min(contentWidth - 1, Math.max(0, e.getX() - contentRect.left));
+        double y = Math.min(contentHeight - 1, Math.max(0, e.getY() - contentRect.top));
         NativeSena.touch(handle, phase, x, y);
         return true;
     }
@@ -370,10 +421,12 @@ public final class SenaGameActivity extends AppCompatActivity
     private static final class LaunchParams {
         final String gameRoot;
         final String nls;
+        final String lang;
 
-        LaunchParams(String gameRoot, String nls) {
+        LaunchParams(String gameRoot, String nls, String lang) {
             this.gameRoot = gameRoot;
             this.nls = NlsOption.fromValue(nls).value;
+            this.lang = LangOption.fromValue(lang).value;
         }
     }
 
@@ -404,7 +457,8 @@ public final class SenaGameActivity extends AppCompatActivity
                 return null;
             }
             String nls = o.optString("nls_utf8", NlsOption.SHIFT_JIS.value);
-            return new LaunchParams(root, nls);
+            String lang = o.optString("lang_utf8", LangOption.DEFAULT.value);
+            return new LaunchParams(root, nls, lang);
         } catch (Throwable t) {
             return null;
         }

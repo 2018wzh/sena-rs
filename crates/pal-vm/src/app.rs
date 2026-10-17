@@ -10,6 +10,7 @@ use winit::keyboard::Key;
 use winit::window::{Window, WindowId};
 
 use crate::audio::AudioConfig;
+use crate::config::TextLang;
 use crate::engine::{Engine, EngineConfig, TraceConfig};
 use crate::event::{InputEvent, MouseButton, PalEvent};
 use crate::platform_time::{Duration, Instant};
@@ -21,6 +22,11 @@ use crate::scene::{rasterize_scene_rgba, FrameScene};
 pub struct SenaConfig {
     pub game_root: Option<PathBuf>,
     pub nls: Nls,
+    /// Which field of a multi-language text record the engine displays.
+    pub lang: TextLang,
+    /// TrueType face used as the text fallback instead of the auto-discovered
+    /// `fonts/*.ttf` of the game root.
+    pub font_file: Option<PathBuf>,
     pub title: String,
     pub width: u32,
     pub height: u32,
@@ -97,6 +103,8 @@ impl Default for SenaConfig {
         Self {
             game_root: None,
             nls: Nls::ShiftJis,
+            lang: TextLang::Jp,
+            font_file: None,
             title: "sena".to_owned(),
             width: FrameScene::PAL_DEFAULT_WIDTH,
             height: FrameScene::PAL_DEFAULT_HEIGHT,
@@ -806,6 +814,8 @@ pub(crate) fn build_engine(config: &SenaConfig) -> anyhow::Result<Engine> {
     Engine::new(EngineConfig {
         game_root: config.game_root.clone(),
         nls: config.nls,
+        lang: config.lang,
+        font_file: config.font_file.clone(),
         script_runtime: ScriptRuntimeConfig {
             instructions_per_frame: config.script_budget_per_frame,
             trace: config.trace_script,

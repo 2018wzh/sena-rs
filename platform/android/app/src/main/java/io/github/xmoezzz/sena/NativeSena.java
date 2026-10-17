@@ -39,7 +39,8 @@ public final class NativeSena {
             int heightPx,
             double nativeScaleFactor,
             String gameDirUtf8,
-            String nlsUtf8
+            String nlsUtf8,
+            String langUtf8
     );
 
     public static native void setNativeMessageboxCallback(long handle);

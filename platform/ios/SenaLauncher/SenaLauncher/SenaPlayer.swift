@@ -11,7 +11,8 @@ private func sena_ios_create(
     _ heightPx: UInt32,
     _ nativeScaleFactor: Double,
     _ gameRootUtf8: UnsafePointer<CChar>,
-    _ nlsUtf8: UnsafePointer<CChar>
+    _ nlsUtf8: UnsafePointer<CChar>,
+    _ langUtf8: UnsafePointer<CChar>?
 ) -> UnsafeMutableRawPointer?
 
 @_silgen_name("sena_ios_step")
@@ -251,7 +252,7 @@ final class SenaPlayerViewController: UIViewController {
 
         gameRoot.withCString { gameC in
             nls.withCString { nlsC in
-                let hnd = sena_ios_create(viewPtr, wPx, hPx, scale, gameC, nlsC)
+                let hnd = sena_ios_create(viewPtr, wPx, hPx, scale, gameC, nlsC, nil)
                 self.handle = hnd
                 if hnd != nil {
                     var lw: UInt32 = 1280

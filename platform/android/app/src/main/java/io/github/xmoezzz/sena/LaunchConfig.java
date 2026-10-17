@@ -18,7 +18,7 @@ public final class LaunchConfig {
 
     private LaunchConfig() {}
 
-    public static void write(Context ctx, String gameRootUtf8, String nlsUtf8) throws Exception {
+    public static void write(Context ctx, String gameRootUtf8, String nlsUtf8, String langUtf8) throws Exception {
         File base = new File(ctx.getFilesDir(), "SenaLauncher");
         //noinspection ResultOfMethodCallIgnored
         base.mkdirs();
@@ -27,6 +27,7 @@ public final class LaunchConfig {
         JSONObject o = new JSONObject();
         o.put("game_root_utf8", gameRootUtf8);
         o.put("nls_utf8", NlsOption.fromValue(nlsUtf8).value);
+        o.put("lang_utf8", LangOption.fromValue(langUtf8).value);
 
         byte[] data = o.toString(2).getBytes(StandardCharsets.UTF_8);
         try (FileOutputStream out = new FileOutputStream(f, false)) {

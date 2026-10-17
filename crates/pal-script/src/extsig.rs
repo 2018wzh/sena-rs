@@ -3112,6 +3112,33 @@ static SIG_SET_LANGUAGE: ExtSig = sig!(9, 17, "set_language", pop=1,
     status=Verified, decompiler=Verified,
     evidence=[GameSqlite:"reverse/Game.sqlite sub_438090 pops font_type and calls PalFontSetType", PalSqlite:"reverse/PAL.sqlite PalFontSetType 0x1011C4A2 -> PalFontSetType_0 stores Block[232]"],
     game="0x00438090", pal="PalFontSetType" => "0x1011C4A2");
+/// category 9 index 60: set_language
+///
+/// Purpose: Select which language field of a multi-language text record is
+/// displayed. The localized FHD releases join every language inside one record
+/// (`日文※简体※繁体`); the SYSTEM screen's language row stores the picked field
+/// in the script's own settings and then calls this, and the boot path calls it
+/// once with the stored value.
+///
+/// VM arguments:
+/// - pop[0]: field (Integer) — text-record field to display: 1 Simplified
+///   Chinese, 2 Traditional Chinese. 0 is the value an unset setting holds, so
+///   it keeps the language the host configured.
+///
+/// Return: status integer.
+///
+/// Side effects: ChangesTextState.
+///
+/// Evidence: the Chinese FHD SCRIPT.SRC stores the pressed language button
+/// index minus the first button (point 2197, pc 0x3B62C) in `mem_system[102]`
+/// and calls ext 0009:003C; its boot init (pc 0x36338) calls the same index
+/// with the stored value. Original Japanese scripts never use this index.
+static SIG_SET_LANGUAGE_FHD: ExtSig = sig!(9, 60, "set_language", pop=1,
+    params=["field":0=Integer=>"text-record language field (1 simplified, 2 traditional)"],
+    return=Integer, effects=[ChangesTextState],
+    purpose="Select the multi-language text field to display.",
+    status=Verified, decompiler=Verified,
+    evidence=[Disassembly:"testcase-cn SCRIPT.SRC point 2197 pc 0x3B62C writes mem_system[102] = pressed language button - 73, then calls ext 0009:003C", RuntimeTrace:"SYSTEM 语言切换 click re-typesets the parked ADV line from the switched field"]);
 /// category 9 index 19: set_font_color
 ///
 /// Purpose: Set PAL shared UI font primary/effect colors.
@@ -5337,6 +5364,7 @@ pub fn lookup_sig(category: u16, index: u16) -> Option<&'static ExtSig> {
         (9, 31) => Some(&SIG_GET_FONT_EFFECT),
         (9, 52) => Some(&SIG_CANCEL_SCENE_SKIP),
         (9, 53) => Some(&SIG_LIST_STACK_GET_COUNT),
+        (9, 60) => Some(&SIG_SET_LANGUAGE_FHD),
         (15, 4) => Some(&SIG_SYSTEM_WINDOW_OVERLAY_SET),
         (15, 5) => Some(&SIG_DEBUG_WINDOW_SET),
         (12, 0) => Some(&SIG_SYSTEM_BTN_SET),
@@ -5845,6 +5873,7 @@ pub fn observed_pop_count(category: u16, index: u16) -> Option<usize> {
         (9, 51) => Some(1),
         (9, 52) => Some(1),
         (9, 53) => Some(0),
+        (9, 60) => Some(1),
         (10, 0) => Some(3),
         (10, 1) => Some(3),
         (10, 4) => Some(2),

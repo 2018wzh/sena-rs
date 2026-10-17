@@ -10,11 +10,14 @@ use std::os::raw::{c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::str::FromStr;
+#[cfg(target_os = "android")]
+use std::sync::Once;
 use std::time::Duration;
 
 use pal_asset::Nls;
 
 use crate::app::build_engine;
+use crate::config::TextLang;
 use crate::engine::Engine;
 use crate::event::{InputEvent, MouseButton, PalEvent};
 use crate::runtime::RuntimeStatus;
@@ -65,6 +68,14 @@ fn nls_from_cstr(ptr: *const c_char) -> Nls {
         .filter(|s| !s.trim().is_empty())
         .and_then(|s| Nls::from_str(s).ok())
         .unwrap_or_default()
+}
+
+fn lang_from_cstr(ptr: *const c_char) -> TextLang {
+    unsafe { string_from_cstr(ptr) }
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| TextLang::from_str(s).ok())
+        .unwrap_or(TextLang::Jp)
 }
 
 fn runtime_status_is_terminal(status: &RuntimeStatus) -> bool {
@@ -175,7 +186,7 @@ pub unsafe extern "C" fn sena_game_cover_mime_from_dir(
 /// Runs the desktop Sena engine with `game_root_utf8` as the game directory.
 #[no_mangle]
 pub unsafe extern "C" fn sena_run_entry(game_root_utf8: *const c_char) -> i32 {
-    sena_run_entry_nls(game_root_utf8, ptr::null())
+    sena_run_entry_nls(game_root_utf8, ptr::null(), ptr::null())
 }
 
 /// Runs the desktop Sena engine with an explicit text/resource encoding.
@@ -183,6 +194,7 @@ pub unsafe extern "C" fn sena_run_entry(game_root_utf8: *const c_char) -> i32 {
 pub unsafe extern "C" fn sena_run_entry_nls(
     game_root_utf8: *const c_char,
     nls_utf8: *const c_char,
+    lang_utf8: *const c_char,
 ) -> i32 {
     let game_root = match path_from_cstr(game_root_utf8) {
         Ok(path) => path,
@@ -195,6 +207,7 @@ pub unsafe extern "C" fn sena_run_entry_nls(
     match crate::run_sena(crate::SenaConfig {
         game_root: Some(game_root),
         nls: nls_from_cstr(nls_utf8),
+        lang: lang_from_cstr(lang_utf8),
         ..Default::default()
     }) {
         Ok(()) => 0,
@@ -210,6 +223,7 @@ pub unsafe extern "C" fn sena_run_entry_nls(
 pub unsafe extern "C" fn sena_host_create(
     game_root_utf8: *const c_char,
     nls_utf8: *const c_char,
+    lang_utf8: *const c_char,
     width: u32,
     height: u32,
 ) -> *mut c_void {
@@ -220,9 +234,19 @@ pub unsafe extern "C" fn sena_host_create(
             return ptr::null_mut();
         }
     };
+    let nls = nls_from_cstr(nls_utf8);
+    let lang = lang_from_cstr(lang_utf8);
+    init_android_diagnostics();
+    log::info!(
+        "sena_host_create: root={} nls={nls:?} lang={lang:?} surface={}x{}",
+        game_root.display(),
+        width.max(1),
+        height.max(1)
+    );
     let mut config = crate::SenaConfig {
         game_root: Some(game_root),
-        nls: nls_from_cstr(nls_utf8),
+        nls,
+        lang,
         width: width.max(1),
         height: height.max(1),
         prefer_config_window_size: true,
@@ -231,10 +255,19 @@ pub unsafe extern "C" fn sena_host_create(
     config.renderer.virtual_width = width.max(1);
     config.renderer.virtual_height = height.max(1);
 
-    let mut engine = match build_engine(&config) {
-        Ok(engine) => engine,
-        Err(err) => {
+    // A panic inside the engine or one of its dependencies would unwind out of
+    // this `extern "C"` function and abort the process, leaving the host with
+    // nothing to report. Catch it so a failed create stays an ordinary error.
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_engine(&config)));
+    let mut engine = match built {
+        Ok(Ok(engine)) => engine,
+        Ok(Err(err)) => {
             eprintln!("sena_host_create failed: {err:?}");
+            return ptr::null_mut();
+        }
+        Err(_) => {
+            // The panic hook installed above has already logged the message.
+            eprintln!("sena_host_create panicked");
             return ptr::null_mut();
         }
     };
@@ -262,15 +295,23 @@ pub extern "C" fn sena_host_step(handle: *mut c_void, dt_ms: u32) -> i32 {
         return 2;
     };
     host.engine.handle_event(PalEvent::RedrawRequested);
-    let frame = match host
-        .engine
-        .update_with_delta(Duration::from_millis(dt_ms.max(1).min(250) as u64))
-    {
-        Ok(frame) => frame,
-        Err(err) => {
+    let updated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        host.engine
+            .update_with_delta(Duration::from_millis(dt_ms.max(1).min(250) as u64))
+    }));
+    let frame = match updated {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(err)) => {
             eprintln!("sena_host_step failed: {err:?}");
             host.last_status = 2;
             host.engine.input_begin_frame();
+            return 2;
+        }
+        Err(_) => {
+            // A panic mid-frame leaves the engine in an unknown state; stop the
+            // run the way any other step failure does instead of aborting.
+            eprintln!("sena_host_step panicked");
+            host.last_status = 2;
             return 2;
         }
     };
@@ -370,8 +411,81 @@ pub extern "C" fn sena_host_destroy(handle: *mut c_void) {
     }
 }
 
+/// The native-activity entry point the Android platform never calls.
+///
+/// `winit`'s `android-native-activity` backend links the native-activity glue,
+/// and the glue is what the application library is supposed to complete: the
+/// entry point belongs to the app, not to the glue. This platform drives the
+/// engine from Java through JNI and a `SurfaceView`
+/// (`platform/android/app/src/main/cpp/sena_jni.cpp`), so nothing ever calls
+/// it -- but the symbol has to exist, because an undefined one makes the
+/// dynamic linker refuse to load the library at all
+/// (`dlopen failed: cannot locate symbol "android_main"`), which is what the
+/// launcher saw when it asked the engine for a game's title.
+#[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "C" fn sena_android_init_context(_java_vm_ptr: *mut c_void, _context_ptr: *mut c_void) {}
+pub extern "C" fn android_main(_app: *mut c_void) {
+    log::warn!(
+        "android_main was called, but the Android host drives the engine through JNI"
+    );
+}
+
+/// Installs the logcat logger and the panic hook, once per process.
+///
+/// Android throws a library's stdout and stderr away, so without this a panic
+/// reaches the developer as nothing but a SIGABRT tombstone and every
+/// `log::warn!` in the engine is lost. The desktop hosts keep their own logger
+/// (`env_logger` in the CLI), so this is Android-only.
+#[cfg(target_os = "android")]
+fn init_android_diagnostics() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_tag("sena")
+                .with_max_level(log::LevelFilter::Info),
+        );
+        std::panic::set_hook(Box::new(|info| {
+            log::error!("panic: {info}");
+        }));
+    });
+}
+
+#[cfg(not(target_os = "android"))]
+fn init_android_diagnostics() {}
+
+/// Registers the JNI handles the audio backend reaches the platform through.
+///
+/// `cpal`'s AAudio host calls `ndk_context::android_context()`, which panics
+/// until the context is registered; that panic unwinds out of `extern "C"` and
+/// aborts the process, so the first SOUND init took the whole player down with
+/// it. `platform/android/app/src/main/cpp/sena_jni.cpp` passes the `JavaVM` and
+/// a global reference to the application context.
+#[no_mangle]
+pub extern "C" fn sena_android_init_context(java_vm_ptr: *mut c_void, context_ptr: *mut c_void) {
+    init_android_diagnostics();
+
+    #[cfg(target_os = "android")]
+    {
+        if java_vm_ptr.is_null() || context_ptr.is_null() {
+            log::warn!(
+                "sena_android_init_context: null JavaVM or context; audio backends cannot start"
+            );
+            return;
+        }
+        // `initialize_android_context` asserts it is only called once.
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| unsafe {
+            ndk_context::initialize_android_context(java_vm_ptr, context_ptr);
+        });
+        log::info!("sena_android_init_context: registered the Android context");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (java_vm_ptr, context_ptr);
+    }
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn sena_android_create(
@@ -381,8 +495,15 @@ pub unsafe extern "C" fn sena_android_create(
     _native_scale_factor: f64,
     game_dir_utf8: *const c_char,
     nls_utf8: *const c_char,
+    lang_utf8: *const c_char,
 ) -> *mut c_void {
-    sena_host_create(game_dir_utf8, nls_utf8, surface_width_px, surface_height_px)
+    sena_host_create(
+        game_dir_utf8,
+        nls_utf8,
+        lang_utf8,
+        surface_width_px,
+        surface_height_px,
+    )
 }
 
 #[no_mangle]
@@ -463,8 +584,15 @@ pub unsafe extern "C" fn sena_ios_create(
     _native_scale_factor: f64,
     game_root_utf8: *const c_char,
     nls_utf8: *const c_char,
+    lang_utf8: *const c_char,
 ) -> *mut c_void {
-    sena_host_create(game_root_utf8, nls_utf8, surface_width, surface_height)
+    sena_host_create(
+        game_root_utf8,
+        nls_utf8,
+        lang_utf8,
+        surface_width,
+        surface_height,
+    )
 }
 
 #[no_mangle]
@@ -565,15 +693,16 @@ pub struct SenaPumpHandle {
 
 #[no_mangle]
 pub unsafe extern "C" fn sena_pump_create(game_root_utf8: *const c_char) -> *mut SenaPumpHandle {
-    sena_pump_create_nls(game_root_utf8, ptr::null())
+    sena_pump_create_nls(game_root_utf8, ptr::null(), ptr::null())
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn sena_pump_create_nls(
     game_root_utf8: *const c_char,
     nls_utf8: *const c_char,
+    lang_utf8: *const c_char,
 ) -> *mut SenaPumpHandle {
-    sena_host_create(game_root_utf8, nls_utf8, 1280, 720) as *mut SenaPumpHandle
+    sena_host_create(game_root_utf8, nls_utf8, lang_utf8, 1280, 720) as *mut SenaPumpHandle
 }
 
 #[no_mangle]

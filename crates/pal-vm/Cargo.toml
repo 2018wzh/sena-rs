@@ -49,6 +49,10 @@ wgpu.workspace = true
 wmv-decoder.workspace = true
 winit.workspace = true
 
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.15"
+ndk-context = "0.1"
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 console_error_panic_hook = "0.1"
 js-sys = "0.3"

@@ -48,6 +48,7 @@ public final class GameAdapter extends RecyclerView.Adapter<GameAdapter.Holder> 
         GameEntry e = items.get(position);
         holder.title.setText(e.title);
         holder.nls.setText(NlsOption.fromValue(e.nls).label);
+        holder.lang.setText(LangOption.fromValue(e.lang).label);
         if (e.coverPath != null && !e.coverPath.isEmpty() && new File(e.coverPath).isFile()) {
             holder.cover.setImageURI(Uri.fromFile(new File(e.coverPath)));
             holder.cover.setVisibility(View.VISIBLE);
@@ -73,11 +74,13 @@ public final class GameAdapter extends RecyclerView.Adapter<GameAdapter.Holder> 
         final ImageView cover;
         final TextView title;
         final TextView nls;
+        final TextView lang;
         Holder(@NonNull View itemView) {
             super(itemView);
             cover = itemView.findViewById(R.id.img_cover);
             title = itemView.findViewById(R.id.txt_title);
             nls = itemView.findViewById(R.id.txt_nls);
+            lang = itemView.findViewById(R.id.txt_lang);
         }
     }
 }

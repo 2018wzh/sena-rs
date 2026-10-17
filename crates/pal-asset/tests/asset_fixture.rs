@@ -74,6 +74,57 @@ fn resource_manager_bootstraps_archive_dat_stored_in_data_pac() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// The localized FHD releases name their translated archives in a second list,
+/// `archive_cn.dat` / `archive_tc.dat`.  Those archives must be searched before
+/// the base ones so a translated screen shadows the original one.
+#[test]
+fn resource_manager_applies_language_archive_list_ahead_of_base() {
+    let dir = temp_dir("pal_asset_language_list");
+    let archive_key = make_pac_key("ARCHIVE.DAT", Nls::ShiftJis).unwrap();
+    let language_key = make_pac_key("ARCHIVE_CN.DAT", Nls::ShiftJis).unwrap();
+    let script_key = make_pac_key("script.src", Nls::ShiftJis).unwrap();
+    fs::write(
+        dir.join("data.pac"),
+        make_entries_pac(&[
+            (archive_key, b"data|system|etc"),
+            (language_key, b"system_cn|etc_cn|movie_cn|update_cn"),
+            (script_key, b"Sv20script"),
+        ]),
+    )
+    .unwrap();
+
+    let mut manager =
+        ResourceManager::bootstrap_with_language(&dir, Nls::ShiftJis, Some("archive_cn.dat"))
+            .unwrap();
+    assert_eq!(
+        manager.paths(),
+        &[
+            "data", "system_cn", "etc_cn", "movie_cn", "update_cn", "system", "etc",
+        ]
+        .map(str::to_string)
+    );
+    let asset = manager.open("script.src").unwrap();
+    assert_eq!(asset.bytes, b"Sv20script");
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// A single-language install has no second list, and that stays non-fatal.
+#[test]
+fn resource_manager_ignores_missing_language_archive_list() {
+    let dir = temp_dir("pal_asset_no_language_list");
+    fs::create_dir_all(dir.join("data")).unwrap();
+    fs::write(dir.join("data").join("archive.dat"), b"data|bg|").unwrap();
+
+    let plain = ResourceManager::bootstrap(&dir, Nls::ShiftJis).unwrap();
+    let missing =
+        ResourceManager::bootstrap_with_language(&dir, Nls::ShiftJis, Some("archive_cn.dat"))
+            .unwrap();
+    assert_eq!(missing.paths(), plain.paths());
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
 fn make_one_entry_pac(key: [u8; 32], payload: &[u8]) -> Vec<u8> {
     make_entries_pac(&[(key, payload)])
 }

@@ -17,12 +17,24 @@ public final class GameDisplayInfo {
 
     public static GameDisplayInfo fromGameRoot(File root) {
         String rootPath = root != null ? root.getAbsolutePath() : "";
-        String name = safeTrim(NativeSena.gameNameFromDir(rootPath));
+        String name = null;
+        String coverPath = null;
+        String coverMime = null;
+        try {
+            name = safeTrim(NativeSena.gameNameFromDir(rootPath));
+            coverPath = safeTrim(NativeSena.gameCoverPathFromDir(rootPath));
+            coverMime = safeTrim(NativeSena.gameCoverMimeFromDir(rootPath));
+        } catch (Throwable t) {
+            // The engine library may be absent for this ABI, in which case the
+            // whole native bridge is unavailable. A tile still works without it:
+            // it falls back to the folder name and a generated cover.
+            name = null;
+            coverPath = null;
+            coverMime = null;
+        }
         if (name == null || name.isEmpty()) {
             name = fallbackName(root);
         }
-        String coverPath = safeTrim(NativeSena.gameCoverPathFromDir(rootPath));
-        String coverMime = safeTrim(NativeSena.gameCoverMimeFromDir(rootPath));
         if (coverPath == null || coverPath.isEmpty()) {
             coverPath = null;
             coverMime = null;

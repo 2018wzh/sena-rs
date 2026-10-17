@@ -6,9 +6,11 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.Settings;
+import android.view.View;
 import android.widget.Button;
 import android.widget.ArrayAdapter;
 import android.widget.Spinner;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -16,6 +18,10 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.app.AlertDialog;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -33,6 +39,8 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
     private GameLibrary library;
     private GameAdapter adapter;
     private Spinner nlsSpinner;
+    private Spinner langSpinner;
+    private TextView emptyHint;
 
     private final ActivityResultLauncher<Uri> openTreeLauncher =
             registerForActivityResult(new ActivityResultContracts.OpenDocumentTree(), this::onImportTreeSelected);
@@ -43,12 +51,26 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
 
         setContentView(R.layout.activity_launcher);
 
+        // Edge-to-edge is forced from targetSdk 35 on, so the header used to be
+        // drawn under the status bar (the clock sat on the import button). Keep
+        // the bars transparent but push the content clear of them.
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        final int basePadding = Math.round(12f * getResources().getDisplayMetrics().density);
+        View root = findViewById(R.id.launcher_root);
+        ViewCompat.setOnApplyWindowInsetsListener(root, (v, windowInsets) -> {
+            Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
+            v.setPadding(basePadding, basePadding + bars.top, basePadding, basePadding + bars.bottom);
+            return windowInsets;
+        });
+
         library = new GameLibrary(this);
 
         RecyclerView rv = findViewById(R.id.game_grid);
         rv.setLayoutManager(new GridLayoutManager(this, computeColumnCount()));
         adapter = new GameAdapter(this);
         rv.setAdapter(adapter);
+
+        emptyHint = findViewById(R.id.empty_hint);
 
         Button importBtn = findViewById(R.id.btn_import);
         importBtn.setOnClickListener(v -> startImportFlow());
@@ -59,12 +81,21 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
         nlsSpinner.setAdapter(nlsAdapter);
         nlsSpinner.setSelection(0);
 
+        langSpinner = findViewById(R.id.spinner_lang);
+        ArrayAdapter<String> langAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, LangOption.labels());
+        langAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        langSpinner.setAdapter(langAdapter);
+        langSpinner.setSelection(LangOption.indexOfValue(LangOption.DEFAULT.value));
+
         refresh();
     }
 
     private void refresh() {
         List<GameEntry> entries = library.load();
         adapter.setItems(entries);
+        if (emptyHint != null) {
+            emptyHint.setVisibility(entries.isEmpty() ? View.VISIBLE : View.GONE);
+        }
     }
 
     private int computeColumnCount() {
@@ -126,7 +157,7 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
 
         new Thread(() -> {
             try {
-                GameLibrary.ImportedGameDraft draft = library.importFromTreeUri(treeUri, selectedNlsValue());
+                GameLibrary.ImportedGameDraft draft = library.importFromTreeUri(treeUri, selectedNlsValue(), selectedLangValue());
                 runOnUiThread(() -> addImportedGame(draft));
             } catch (Throwable t) {
                 library.cleanupPartialImport();
@@ -151,7 +182,7 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
     public void onGameClicked(GameEntry e) {
         try {
             // Write launch config that native code can read on startup.
-            LaunchConfig.write(this, e.rootPath, e.nls);
+            LaunchConfig.write(this, e.rootPath, e.nls, e.lang);
 
             Intent it = new Intent(this, SenaGameActivity.class);
             startActivity(it);
@@ -164,12 +195,25 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
     public void onGameLongPressed(GameEntry e) {
         if (e == null) return;
 
+        final LangOption[] langs = LangOption.values();
+        String[] items = new String[3 + langs.length + 1];
+        items[0] = "Use ShiftJIS";
+        items[1] = "Use GBK";
+        items[2] = "Use UTF-8";
+        for (int i = 0; i < langs.length; i++) {
+            items[3 + i] = "Language: " + langs[i].label;
+        }
+        items[3 + langs.length] = "Remove";
+
         new AlertDialog.Builder(this)
                 .setTitle(e.title)
-                .setItems(new String[] { "Use ShiftJIS", "Use GBK", "Use UTF-8", "Remove" }, (d, which) -> {
+                .setItems(items, (d, which) -> {
                     try {
                         if (which >= 0 && which < 3) {
                             library.updateNls(e, NlsOption.values()[which].value);
+                            refresh();
+                        } else if (which >= 3 && which < 3 + langs.length) {
+                            library.updateLang(e, langs[which - 3].value);
                             refresh();
                         } else {
                             Toast.makeText(this, "Use the launcher list controls to remove games.", Toast.LENGTH_SHORT).show();
@@ -185,6 +229,13 @@ public final class LauncherActivity extends AppCompatActivity implements GameAda
     private String selectedNlsValue() {
         int pos = nlsSpinner != null ? nlsSpinner.getSelectedItemPosition() : 0;
         NlsOption[] options = NlsOption.values();
+        if (pos < 0 || pos >= options.length) pos = 0;
+        return options[pos].value;
+    }
+
+    private String selectedLangValue() {
+        int pos = langSpinner != null ? langSpinner.getSelectedItemPosition() : 0;
+        LangOption[] options = LangOption.values();
         if (pos < 0 || pos >= options.length) pos = 0;
         return options[pos].value;
     }

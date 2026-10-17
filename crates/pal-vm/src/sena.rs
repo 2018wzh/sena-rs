@@ -5,7 +5,7 @@ use pal_asset::Nls;
 use pal_vm::{
     run_sena, AudioConfig, DiagnosticAutoAdvance, DiagnosticClick, DiagnosticClickWhenHitEnabled,
     DiagnosticKeyEvent, DiagnosticPngAt, DiagnosticWheelEvent, FrameScene, MouseButton,
-    ScriptRuntimeConfig, SenaConfig,
+    ScriptRuntimeConfig, SenaConfig, TextLang,
 };
 
 #[derive(Debug, Parser)]
@@ -17,6 +17,18 @@ struct Args {
 
     #[arg(long, default_value = "sjis")]
     nls: Nls,
+
+    /// Text-record language: fields of multi-language text tables, such as the
+    /// `日文※简体※繁体` records of the FHD releases. `jp` also keeps the
+    /// original single-language tables unchanged.
+    #[arg(long, default_value = "jp")]
+    lang: TextLang,
+
+    /// TrueType face for the text fallback. Without it the engine takes the
+    /// face of the game root's own `fonts` directory that is tagged for the
+    /// text language, the first by path otherwise.
+    #[arg(long)]
+    font_file: Option<PathBuf>,
 
     #[arg(long, default_value_t = FrameScene::PAL_DEFAULT_WIDTH)]
     width: u32,
@@ -163,6 +175,8 @@ fn main() -> anyhow::Result<()> {
     run_sena(SenaConfig {
         game_root: args.game_root,
         nls: args.nls,
+        lang: args.lang,
+        font_file: args.font_file,
         title: args.title,
         width: args.width,
         height: args.height,

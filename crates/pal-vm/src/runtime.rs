@@ -10,12 +10,14 @@ use pal_script::extsig::{lookup_sig, observed_pop_count};
 use pal_script::opcodes::{ext_opcode, primary_opcode};
 use pal_script::{Operand, OperandKind, PointTable, ScriptImage};
 
-use crate::assets::CoreAssets;
+use crate::assets::{CoreAssets, FileDatLayout};
 use crate::audio::{
     audio_lookup_key, decode_game_audio, parse_bgm_csv, AudioHandle, AudioSystem, BgmLoop,
     PalSoundGroup, PalVolume,
 };
-use crate::config::{ini_graphics_size, parse_ini_nls, IniFile, IniValue};
+use crate::config::{
+    ini_graphics_size, parse_system_ini, IniFile, IniValue, TextLang, TEXT_FIELD_SEPARATOR,
+};
 use crate::effect::PalEffectSystem;
 use crate::font::PalFontSystem;
 use crate::image::{decode_image, decode_image_with_resolver, DecodedImage};
@@ -494,6 +496,20 @@ pub struct ScriptRuntime {
     dynamic_string_cursor: usize,
     /// SYSTEM.INI parsed through the selected external NLS.
     system_ini: Option<IniFile>,
+    /// Language field read out of multi-language text records.
+    text_lang: TextLang,
+    /// TrueType faces the release ships as loose files, in path order.
+    ///
+    /// Kept past boot so a later font-type change (`set_language`, category 9
+    /// index 17) can switch the text face without the game root at hand.
+    font_face_candidates: Vec<PathBuf>,
+    /// The loose face currently loaded as the text face, when one is.
+    loaded_face_path: Option<PathBuf>,
+    /// Whether this release lets the PAL font type select among its own faces.
+    ///
+    /// Only a localized release that ships several faces offers the choice;
+    /// the original installs keep their bitmap and embedded faces.
+    style_faces_enabled: bool,
     system_state: PalSystemState,
     /// PAL random seed ring used by PalRandomEx and Game category 20 random.
     random_state: PalRandomState,
@@ -1102,6 +1118,10 @@ struct RuntimeSaveSnapshot {
     text_args: [i32; 4],
     text_base: i32,
     text_mode: i32,
+    /// ADV window alpha (category 2 index 11). The script re-establishes it
+    /// whenever a scene or background changes, so a save restored mid-scene
+    /// depends on it; `None` in saves written before version 7.
+    text_alpha: Option<i32>,
     text_visible: bool,
     vars: Vec<i32>,
     stack: Vec<i32>,
@@ -1435,6 +1455,10 @@ impl ScriptRuntime {
             dynamic_strings: Vec::new(),
             dynamic_string_cursor: 0,
             system_ini: None,
+            text_lang: TextLang::default(),
+            font_face_candidates: Vec::new(),
+            loaded_face_path: None,
+            style_faces_enabled: false,
             system_state: PalSystemState::new(),
             random_state: PalRandomState::default(),
             frame_events: Vec::new(),
@@ -1445,6 +1469,41 @@ impl ScriptRuntime {
             system_scratch_value: 0,
             debug_window_state: 0,
         }
+    }
+
+    /// Select which field of a multi-language text record is displayed.
+    ///
+    /// Only affects the FHD text layout; original single-language pools have
+    /// no separator and render identically for every value.
+    pub fn set_text_lang(&mut self, lang: TextLang) {
+        self.text_lang = lang;
+    }
+
+    /// Switch the displayed text field of a multi-language release and refresh
+    /// everything already rendered from the previous field.
+    ///
+    /// The FHD releases join every language in one text record, so a language
+    /// change is visible immediately: the current ADV body re-typesets and the
+    /// backlog is measured again from the new field. Original single-language
+    /// pools carry no separator, so the switch leaves their text alone.
+    pub fn apply_text_language(&mut self, lang: TextLang) {
+        if self.text_lang == lang {
+            return;
+        }
+        self.set_text_lang(lang);
+        self.invalidate_text_layout();
+    }
+
+    /// Re-typeset everything already rendered from the current text.
+    ///
+    /// The body panel is rasterized once per text change; dropping the cache
+    /// re-resolves and rebuilds it even if the text is hidden at the moment of
+    /// the change (a hidden window only clears `dirty`). The backlog is
+    /// measured again for the same reason.
+    fn invalidate_text_layout(&mut self) {
+        self.text_state.dirty = true;
+        self.text_state.render_cache = None;
+        self.history_state.layout_cache = None;
     }
 
     pub fn set_system_ini(&mut self, ini: IniFile) {
@@ -1464,7 +1523,15 @@ impl ScriptRuntime {
         self.system_ini = Some(ini);
     }
 
-    pub fn load_configured_font(&mut self, resource_manager: &mut ResourceManager, nls: Nls) {
+    pub fn load_configured_font(
+        &mut self,
+        resource_manager: &mut ResourceManager,
+        nls: Nls,
+        root: Option<&Path>,
+        font_file: Option<&Path>,
+        lang: TextLang,
+        text_dat_multilingual: bool,
+    ) {
         let name = self
             .system_ini
             .as_ref()
@@ -1488,6 +1555,74 @@ impl ScriptRuntime {
                 ),
             },
             Err(err) => log::debug!("[trace-text] PAL bitmap font {name:?} unavailable: {err}"),
+        }
+        self.font_face_candidates = game_font_faces(root, font_file);
+        let face = pick_face_for(&self.font_face_candidates, lang, None);
+        let external = self.load_face(face);
+        // A localized release ships the original `DEFAULT_FONT.DAT` and draws
+        // text with its own faces, so only leave the bitmap font in play when
+        // such a release supplied no face at all. Such a release also asks the
+        // player to choose the face on its SYSTEM screen, which reaches the
+        // engine as a PAL font type — only where it ships more than one face.
+        if text_dat_multilingual && external {
+            self.font_state.set_bitmap_text_enabled(false);
+            self.style_faces_enabled = self.font_face_candidates.len() > 1;
+        }
+    }
+
+    /// Load `path` as the text face, remembering it as the active one.
+    ///
+    /// Returns whether a face was loaded.
+    fn load_face(&mut self, path: Option<PathBuf>) -> bool {
+        let Some(path) = path else {
+            return false;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                if self.font_state.load_external_font(bytes) {
+                    log::debug!("[trace-text] loaded external font {}", path.display());
+                    self.loaded_face_path = Some(path);
+                    true
+                } else {
+                    log::warn!(
+                        "[trace-text] external font {} is not a usable TrueType face",
+                        path.display()
+                    );
+                    false
+                }
+            }
+            Err(err) => {
+                log::warn!(
+                    "[trace-text] external font {} is unreadable: {err}",
+                    path.display()
+                );
+                false
+            }
+        }
+    }
+
+    /// Re-select the text face that a PAL font type names.
+    ///
+    /// The FHD releases offer 思源宋体 and 思源黑体 on their SYSTEM screen and
+    /// record the picked row as the PAL font type the boot path passes to
+    /// `set_language` (category 9 index 17), so the type doubles as the face
+    /// style there. The row writes no other state and the change is applied
+    /// here rather than by a live redraw, matching those releases' engine: the
+    /// stored type is picked up on the next boot. The original releases ship no
+    /// such faces and keep the face boot selected.
+    fn select_style_face(&mut self, style: FaceStyle) {
+        if !self.style_faces_enabled {
+            return;
+        }
+        let lang = self.text_lang;
+        let Some(path) = pick_face_for(&self.font_face_candidates, lang, Some(style)) else {
+            return;
+        };
+        if self.loaded_face_path.as_deref() == Some(path.as_path()) {
+            return;
+        }
+        if self.load_face(Some(path)) {
+            self.invalidate_text_layout();
         }
     }
 
@@ -5588,6 +5723,35 @@ impl ScriptRuntime {
                 if let Some(font_type) = args.first().copied() {
                     self.font_state.set_type(font_type.max(0) as u16);
                     self.system_state.set_language(font_type);
+                    // On a release that ships its own faces the type also names
+                    // the text face style (the SYSTEM screen's 文本字体 row).
+                    if let Some(style) = FaceStyle::from_font_type(font_type.max(0) as u16) {
+                        self.select_style_face(style);
+                    }
+                }
+                ExtCallOutcome::Value(1)
+            }
+            60 => {
+                // FHD release `set_language` (category 9 index 60, distinct
+                // from the PAL font type the index-17 call sets). The language
+                // row on the SYSTEM screen stores the picked text field in
+                // `mem_system[102]` and passes it here, and the boot path calls
+                // this once with that stored value. Only the localized fields
+                // are offered on screen (a Japanese install never calls this
+                // index at all), while a fresh install leaves the stored value
+                // at 0 — so 0 keeps the language the host configured
+                // (`--lang` / launcher) instead of resetting a localized
+                // release to its Japanese field.
+                let args = self.pop_ext_args(1);
+                let value = args.first().copied().unwrap_or(0);
+                if value != 0 {
+                    if let Some(lang) = TextLang::from_field_index(value) {
+                        log::debug!(
+                            "[trace-text] set_language field={value} -> {}",
+                            lang.as_str()
+                        );
+                        self.apply_text_language(lang);
+                    }
                 }
                 ExtCallOutcome::Value(1)
             }
@@ -10396,17 +10560,32 @@ impl ScriptRuntime {
             }
         };
         let (logical_width, logical_height) = self.logical_size();
+        let project_native_draw = should_project_game_sprite_native_draw(arg_count, decoded.height);
+        // The FHD standing images are authored at 2.84x the native stage height
+        // (the JP art is 2048 tall in a 720 stage, the CN art 3072 in a 1080
+        // stage).  PAL.dll's draw scales the source rectangle, so the wrapper's
+        // placement helpers see the fitted size: `sub_423550`/`sub_423600` read
+        // `PalSpriteGetInfo`, and only a fitted size makes `mode_y == 2`
+        // bottom-align a full-body standing sprite instead of parking the head
+        // 1992 pixels above the stage.  The script's scale lane and the
+        // `sp_set_pos_move` deltas live in that same fitted space.
+        let native_fit = if project_native_draw {
+            native_sprite_fit_scale(decoded.height)
+        } else {
+            1.0
+        };
         let (mut native_x, mut native_y, native_z) = native_place_sprite(
             arg_count,
             raw_x,
             raw_y,
             raw_z,
-            decoded.width,
-            decoded.height,
+            ((decoded.width as f32) * native_fit).round().max(1.0) as u32,
+            ((decoded.height as f32) * native_fit).round().max(1.0) as u32,
             decoded.offset_x,
             decoded.offset_y,
+            logical_width,
+            logical_height,
         );
-        let project_native_draw = should_project_game_sprite_native_draw(arg_count, decoded.height);
         if arg_count < 5 && !project_native_draw && raw_x != 0xFFFF && raw_y != 0xFFFF {
             let (logical_x, logical_y, _) = place_sprite(
                 arg_count,
@@ -10435,7 +10614,12 @@ impl ScriptRuntime {
         };
         let project_native_draw = initial_visual.project_native_draw;
         let (x, y, z, scale) = if project_native_draw {
-            (native_x, native_y, native_z, pal_scale_to_factor(100))
+            (
+                native_x,
+                native_y,
+                native_z,
+                pal_scale_to_factor(100) * native_fit,
+            )
         } else {
             render_from_native_wrapper(initial_visual, logical_width, logical_height)
         };
@@ -10459,7 +10643,11 @@ impl ScriptRuntime {
         desc.cell_height = decoded.cell_height;
         desc.position = PalVec3::from_f32(x, y, z);
         desc.scale = scale;
-        desc.center_scale = true;
+        // The native draw centers a scale-only sprite on its source rectangle;
+        // with the fitted standing-art scale that centering would push the
+        // sprite thousands of pixels off the stage, so the fitted size anchors
+        // at the placement position the wrapper computed.
+        desc.center_scale = !project_native_draw;
         desc.native_projection = project_native_draw.then_some((
             logical_width.max(1) as f32 / 1920.0,
             logical_height.max(1) as f32 / 1080.0,
@@ -10861,8 +11049,18 @@ impl ScriptRuntime {
         self.game_sprite_native_scales.insert(slot, 100);
         self.game_sprite_base_alpha.entry(slot).or_insert(255);
         self.game_sprite_final_alpha_delta.insert(slot, 0);
-        let (mut native_x, mut native_y, native_z) =
-            native_place_sprite(arg_count, raw_x, raw_y, raw_z, width, height, 0, 0);
+        let (mut native_x, mut native_y, native_z) = native_place_sprite(
+            arg_count,
+            raw_x,
+            raw_y,
+            raw_z,
+            width,
+            height,
+            0,
+            0,
+            logical_width,
+            logical_height,
+        );
         if arg_count < 5 && height <= logical_height && raw_x != 0xFFFF && raw_y != 0xFFFF {
             native_x = unproject_script_x(x, logical_width);
             native_y = unproject_script_y(y, logical_height);
@@ -12160,7 +12358,7 @@ impl ScriptRuntime {
                 visual.native_x,
                 visual.native_y,
                 visual.native_z,
-                pal_scale_to_factor(visual.raw_scale),
+                pal_scale_to_factor(visual.raw_scale) * native_sprite_fit_scale(visual.height),
             )
         } else {
             render_from_native_wrapper(visual, logical_width, logical_height)
@@ -13076,6 +13274,8 @@ impl ScriptRuntime {
                 decoded.height,
                 decoded.offset_x,
                 decoded.offset_y,
+                logical_width,
+                logical_height,
             );
             GameSpriteWrapperVisual {
                 native_x,
@@ -13106,7 +13306,8 @@ impl ScriptRuntime {
                 next_visual.native_x,
                 next_visual.native_y,
                 next_visual.native_z,
-                pal_scale_to_factor(next_visual.raw_scale),
+                pal_scale_to_factor(next_visual.raw_scale)
+                    * native_sprite_fit_scale(next_visual.height),
             )
         } else {
             render_from_native_wrapper(next_visual, logical_width, logical_height)
@@ -13131,7 +13332,10 @@ impl ScriptRuntime {
         desc.cell_height = decoded.cell_height;
         desc.position = PalVec3::from_f32(x, y, z);
         desc.scale = render_scale;
-        desc.center_scale = true;
+        // Same anchoring rule as the initial placement: a fitted standing
+        // sprite is anchored at the wrapper position instead of being centered
+        // on its full-resolution source rectangle.
+        desc.center_scale = !project_native_draw;
         desc.native_projection = project_native_draw.then_some((
             logical_width.max(1) as f32 / 1920.0,
             logical_height.max(1) as f32 / 1080.0,
@@ -13188,8 +13392,21 @@ impl ScriptRuntime {
             let new_rect_height = i32::try_from(decoded.cell_height.max(1)).unwrap_or(i32::MAX);
             let old_rect_width = old_rect.width().max(1);
             let old_rect_height = old_rect.height().max(1);
-            let adjust_x = (new_rect_width.saturating_sub(old_rect_width)) / 2;
-            let adjust_y = (new_rect_height.saturating_sub(old_rect_height)) / 2;
+            // The centering delta is a size delta in the art's own pixel space,
+            // so it takes the same fit as the placement when the wrapper path is
+            // active.
+            let rect_fit = if project_native_draw {
+                native_sprite_fit_scale(decoded.height)
+            } else {
+                1.0
+            };
+            let adjust_x =
+                (((new_rect_width.saturating_sub(old_rect_width)) as f32) * 0.5 * rect_fit).round()
+                    as i32;
+            let adjust_y = (((new_rect_height.saturating_sub(old_rect_height)) as f32)
+                * 0.5
+                * rect_fit)
+                .round() as i32;
             if adjust_x != 0 || adjust_y != 0 {
                 // Game.exe sub_428F10 calls PalSpriteGetRect on the old and
                 // newly loaded PAL sprites, then subtracts half of the rect
@@ -13204,7 +13421,8 @@ impl ScriptRuntime {
                         next_visual.native_x,
                         next_visual.native_y,
                         next_visual.native_z,
-                        pal_scale_to_factor(next_visual.raw_scale),
+                        pal_scale_to_factor(next_visual.raw_scale)
+                            * native_sprite_fit_scale(next_visual.height),
                     )
                 } else {
                     render_from_native_wrapper(next_visual, logical_width, logical_height)
@@ -13426,7 +13644,7 @@ impl ScriptRuntime {
 
     fn capture_save_snapshot(&self) -> RuntimeSaveSnapshot {
         RuntimeSaveSnapshot {
-            version: 6,
+            version: 7,
             pc: self.pc,
             call_stack: self.call_stack.clone(),
             user_mem: bounded_i32_copy(&self.user_mem, DEFAULT_MEM_SIZE),
@@ -13437,6 +13655,7 @@ impl ScriptRuntime {
             text_args: self.text_state.last_text_args,
             text_base: self.text_state.base,
             text_mode: self.text_state.mode,
+            text_alpha: Some(self.text_state.alpha),
             text_visible: self.text_state.visible,
             vars: bounded_i32_copy(&self.vars, DEFAULT_VAR_COUNT),
             stack: self.stack.clone(),
@@ -13644,6 +13863,11 @@ impl ScriptRuntime {
             snapshot.text_args = [0, text_value, 0x0FFF_FFFF, 0x0FFF_FFFF];
             snapshot.text_visible = true;
             snapshot.show_wait_mark = true;
+            // The image's ADV window alpha is part of the context this importer
+            // does not map yet, and the menu the save was taken from is not the
+            // scene being restored: show the window instead of inheriting the
+            // menu's alpha.
+            snapshot.text_alpha = Some(255);
         }
         snapshot.resume_wait_click = true;
         Some(snapshot)
@@ -13664,6 +13888,14 @@ impl ScriptRuntime {
         self.text_state.last_text_value = snapshot.text_args[1];
         self.text_state.base = snapshot.text_base;
         self.text_state.mode = snapshot.text_mode;
+        // The script hides and re-shows the ADV window when a scene or
+        // background changes (`text_window_set_alpha` around `text_set_base`),
+        // so a save restored mid-scene has no call coming to re-establish what
+        // the window looked like at save time. Saves written before version 7
+        // and original-engine images carry no alpha: assume the window the
+        // script left on screen is shown, instead of restoring it to alpha 0,
+        // where the base panel paints nothing and the text sits on a naked CG.
+        self.text_state.alpha = snapshot.text_alpha.unwrap_or(255);
         self.text_state.visible = snapshot.text_visible;
         self.text_state.reveal_enabled = false;
         self.text_state.dirty = true;
@@ -15517,9 +15749,15 @@ impl ScriptRuntime {
             return self.dynamic_strings.get(index).cloned();
         }
         let offset = value.try_into().ok()?;
-        read_text_record_string(&assets.text_dat.bytes, offset, nls)
-            .or_else(|| read_c_string(&assets.text_dat.bytes, offset, nls))
-            .or_else(|| read_c_string(&assets.file_dat.bytes, offset, nls))
+        read_text_record_string(
+            &assets.text_dat.bytes,
+            offset,
+            nls,
+            assets.text_dat_multilingual,
+        )
+        .map(|text| select_text_field(text, self.text_lang, assets.text_dat_multilingual))
+        .or_else(|| read_c_string(&assets.text_dat.bytes, offset, nls))
+        .or_else(|| read_c_string(&assets.file_dat.bytes, offset, nls))
     }
 
     fn resolve_resource_string(&self, value: i32, assets: &CoreAssets, nls: Nls) -> Option<String> {
@@ -15530,15 +15768,21 @@ impl ScriptRuntime {
             return self.dynamic_strings.get(index).cloned();
         }
         let offset = value.try_into().ok()?;
-        read_file_slot_string(&assets.file_dat.bytes, value, nls)
+        read_file_slot_string(&assets.file_dat.bytes, value, nls, assets.file_dat_layout)
             .or_else(|| read_padded_c_string(&assets.file_dat.bytes, offset, nls))
             .or_else(|| {
-                read_text_record_string(&assets.file_dat.bytes, offset, nls)
+                read_text_record_string(&assets.file_dat.bytes, offset, nls, false)
                     .filter(|value| is_plausible_resource_name(value))
             })
             .or_else(|| {
-                read_text_record_string(&assets.text_dat.bytes, offset, nls)
-                    .filter(|value| is_plausible_resource_name(value))
+                read_text_record_string(
+                    &assets.text_dat.bytes,
+                    offset,
+                    nls,
+                    assets.text_dat_multilingual,
+                )
+                .map(|text| select_text_field(text, self.text_lang, assets.text_dat_multilingual))
+                .filter(|value| is_plausible_resource_name(value))
             })
             .or_else(|| {
                 read_c_string(&assets.text_dat.bytes, offset, nls)
@@ -15557,10 +15801,10 @@ impl ScriptRuntime {
                         "[trace-assets] ini open name=\"SYSTEM.INI\" source={}",
                         asset_source_label(&asset.source)
                     );
-                    match parse_ini_nls(&asset.bytes, resource_manager.nls()) {
+                    match parse_system_ini(&asset.bytes, resource_manager.nls()) {
                         Ok(ini) => self.set_system_ini(ini),
                         Err(err) => {
-                            log::warn!("[trace-assets] SYSTEM.INI parse failed: {err}");
+                            log::warn!("SYSTEM.INI parse failed: {err}");
                             return None;
                         }
                     }
@@ -16147,12 +16391,22 @@ fn native_place_sprite(
     height: u32,
     default_x: i32,
     default_y: i32,
+    logical_width: u32,
+    logical_height: u32,
 ) -> (f32, f32, f32) {
     if raw_x == 0xFFFF && raw_y == 0xFFFF {
-        // PGD default offsets are authored in the 1280x720 script space. The
-        // wrapper stores native 1920x1080 positions before projecting back
-        // to the configured logical stage; convert these offsets just once.
-        return (default_x as f32 * 1.5, default_y as f32 * 1.5, raw_z as f32);
+        // PGD default offsets are authored in the release's own stage space:
+        // 1280x720 for the original release, 1920x1080 for the FHD releases
+        // that re-author the same artwork at 1.5x. The wrapper stores native
+        // 1920x1080 positions before projecting back to the configured logical
+        // stage; convert these offsets just once, by that same stage scale.
+        let to_native_x = 1920.0 / logical_width.max(1) as f32;
+        let to_native_y = 1080.0 / logical_height.max(1) as f32;
+        return (
+            default_x as f32 * to_native_x,
+            default_y as f32 * to_native_y,
+            raw_z as f32,
+        );
     }
     if arg_count >= 5 {
         let mut x = raw_x;
@@ -16203,10 +16457,26 @@ fn should_project_game_sprite_native_draw(arg_count: usize, height: u32) -> bool
 
 fn native_delta_for_visual(visual: GameSpriteWrapperVisual, x: i32, y: i32) -> (f32, f32) {
     if visual.uses_native_placement_deltas() {
-        (x as f32, y as f32)
+        // The wrapper's `sp_set_pos_move` deltas are authored in the standing
+        // art's own pixel space, so they take the same fit as the art size.
+        let fit = native_sprite_fit_scale(visual.height);
+        (x as f32 * fit, y as f32 * fit)
     } else {
         (native_delta_x(x), native_delta_y(y))
     }
+}
+
+/// Shrink-only fit that maps a tall standing image onto the native 1920x1080
+/// wrapper stage.  PAL.dll draws `source_rect * scale`, and the FHD releases
+/// re-author the original 2048-tall standing art at 3072 (an exact 1.5x), so a
+/// sprite taller than the stage has to be fitted before the script's scale lane
+/// applies.  Anything at or below the stage height is returned unscaled, which
+/// keeps full-screen backgrounds, event CGs and UI art untouched.
+fn native_sprite_fit_scale(height: u32) -> f32 {
+    if height == 0 {
+        return 1.0;
+    }
+    (1080.0 / height as f32).min(1.0)
 }
 
 fn scale_script_x(value: i32, logical_width: u32) -> i32 {
@@ -16540,7 +16810,7 @@ fn decode_portable_system_mem(bytes: &[u8]) -> std::io::Result<Vec<i32>> {
 fn encode_runtime_save_snapshot(snapshot: &RuntimeSaveSnapshot) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"SENARSAV");
-    write_u32(&mut bytes, 6)?;
+    write_u32(&mut bytes, 7)?;
     write_u32(&mut bytes, snapshot.pc)?;
     write_u32_vec(&mut bytes, &snapshot.call_stack)?;
     write_i32_vec(
@@ -16619,6 +16889,8 @@ fn encode_runtime_save_snapshot(snapshot: &RuntimeSaveSnapshot) -> std::io::Resu
         write_i64(&mut bytes, track.loop_start)?;
         write_i64(&mut bytes, track.loop_end)?;
     }
+    // Version 7 appends the ADV window alpha.
+    write_i32(&mut bytes, snapshot.text_alpha.unwrap_or(0))?;
     Ok(bytes)
 }
 
@@ -16703,7 +16975,7 @@ fn decode_runtime_save_snapshot(reader: &mut impl Read) -> std::io::Result<Runti
         ));
     }
     let version = read_u32_from(reader)?;
-    if !(1..=6).contains(&version) {
+    if !(1..=7).contains(&version) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "unsupported portable save version",
@@ -16817,6 +17089,9 @@ fn decode_runtime_save_snapshot(reader: &mut impl Read) -> std::io::Result<Runti
                     loop_end,
                 });
             }
+        }
+        if version >= 7 {
+            snapshot.text_alpha = Some(read_i32_from(reader)?);
         }
     }
     Ok(snapshot)
@@ -17737,9 +18012,167 @@ fn blit_rgba(
     }
 }
 
-fn read_text_record_string(bytes: &[u8], offset: usize, nls: Nls) -> Option<String> {
+fn read_text_record_string(bytes: &[u8], offset: usize, nls: Nls, multilingual: bool) -> Option<String> {
     let start = offset.checked_add(4)?;
-    read_c_string(bytes, start, nls)
+    if multilingual {
+        read_utf16_c_string(bytes, start)
+    } else {
+        read_c_string(bytes, start, nls)
+    }
+}
+
+/// Read the NUL-terminated UTF-16LE string at `offset`.
+///
+/// Used by the FHD text layout, whose records are UTF-16LE; the original
+/// single-byte layout would stop at the high byte of the first character.
+fn read_utf16_c_string(bytes: &[u8], offset: usize) -> Option<String> {
+    if offset >= bytes.len() {
+        return None;
+    }
+    let mut units = Vec::new();
+    let mut position = offset;
+    while position + 2 <= bytes.len() {
+        let unit = u16::from_le_bytes([bytes[position], bytes[position + 1]]);
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+        position += 2;
+    }
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// Pick this language's field out of a multi-language text record.
+///
+/// The FHD pool joins one field per language with U+203B. Records without the
+/// separator (UI format strings) are returned unchanged, and a table that only
+/// holds one language never reaches the split, so the original releases render
+/// byte-for-byte as before.
+fn select_text_field(text: String, lang: TextLang, multilingual: bool) -> String {
+    if !multilingual || !text.contains(TEXT_FIELD_SEPARATOR) {
+        return text;
+    }
+    match text.split(TEXT_FIELD_SEPARATOR).nth(lang.field_index()) {
+        Some(field) => field.to_owned(),
+        None => text,
+    }
+}
+
+/// Text face style a PAL font type names on a release that ships its own faces.
+///
+/// The FHD releases offer 思源宋体 and 思源黑体 on their SYSTEM screen, store the
+/// picked row as the PAL font type the boot `set_language` applies, and tag the
+/// style in the shipped file names (`SourceHanSerif-Medium`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FaceStyle {
+    Serif,
+    Sans,
+}
+
+impl FaceStyle {
+    /// Style a PAL font type selects: the 宋体 row stores 0 and the 黑体 row 1.
+    /// The original releases' types (including the bitmap type 4) name no face.
+    fn from_font_type(font_type: u16) -> Option<Self> {
+        match font_type {
+            0 => Some(Self::Serif),
+            1 => Some(Self::Sans),
+            _ => None,
+        }
+    }
+
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Serif => "serif",
+            Self::Sans => "sans",
+        }
+    }
+}
+
+/// TrueType faces the release ships as loose files, in path order.
+///
+/// The caller's `--font-file` is the whole set; otherwise this is the game's own
+/// `fonts` directory, which the original installs do not have.
+fn game_font_faces(root: Option<&Path>, font_file: Option<&Path>) -> Vec<PathBuf> {
+    if let Some(path) = font_file {
+        return vec![path.to_path_buf()];
+    }
+    let Some(root) = root else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(root.join("fonts"))
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_file()
+                        && path
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("ttf"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    candidates.sort();
+    candidates
+}
+
+/// Pick the face of `style` for `lang`, falling back to the language's face.
+///
+/// A release that ships both styles tags both the script and the style in the
+/// file name, so the language's own tagged face wins and a style it does not
+/// ship (or a single-face install) keeps the face `pick_face` selects.
+fn pick_face_for(
+    candidates: &[PathBuf],
+    lang: TextLang,
+    style: Option<FaceStyle>,
+) -> Option<PathBuf> {
+    let Some(style) = style else {
+        return pick_face(candidates.to_vec(), lang);
+    };
+    let tagged = |path: &Path, tag: &str| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.to_ascii_lowercase().contains(tag))
+    };
+    let style = style.tag();
+    let language = match lang {
+        TextLang::Cn | TextLang::Tc => Some("cn"),
+        TextLang::Jp => None,
+    };
+    if let Some(language) = language {
+        if let Some(face) = candidates
+            .iter()
+            .find(|path| tagged(path, language) && tagged(path, style))
+        {
+            return Some(face.clone());
+        }
+    }
+    if let Some(face) = candidates.iter().find(|path| tagged(path, style)) {
+        return Some(face.clone());
+    }
+    pick_face(candidates.to_vec(), lang)
+}
+
+/// Pick the face tagged for `lang`, falling back to the first one by path.
+///
+/// A release that carries several scripts tags them in the file name — this one
+/// ships `SourceHanSansCN-Medium` (Chinese) next to `SourceHanSans-Medium`
+/// (Japanese) — and its replaced `PAL.dll` picks its text face by the same tag.
+/// Traditional Chinese has no face of its own and uses the Chinese one. A
+/// single-face install has nothing to choose between.
+fn pick_face(candidates: Vec<PathBuf>, lang: TextLang) -> Option<PathBuf> {
+    if matches!(lang, TextLang::Cn | TextLang::Tc) {
+        let tagged = candidates.iter().find(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.to_ascii_lowercase().contains("cn"))
+        });
+        if let Some(tagged) = tagged {
+            return Some(tagged.clone());
+        }
+    }
+    candidates.into_iter().next()
 }
 
 /// Text-pool record id (the 4-byte header read_text_record_string skips).
@@ -17776,10 +18209,20 @@ fn read_padded_c_string(bytes: &[u8], mut offset: usize, nls: Nls) -> Option<Str
     read_c_string(bytes, offset, nls).filter(|value| is_plausible_resource_name(value))
 }
 
-fn read_file_slot_string(bytes: &[u8], value: i32, nls: Nls) -> Option<String> {
+fn read_file_slot_string(
+    bytes: &[u8],
+    value: i32,
+    nls: Nls,
+    layout: FileDatLayout,
+) -> Option<String> {
     let index: usize = value.try_into().ok()?;
-    let offset = 0x10usize.checked_add(index.checked_mul(0x20)?)?;
-    read_c_string(bytes, offset, nls).filter(|value| is_plausible_resource_name(value))
+    let offset = layout.base.checked_add(index.checked_mul(layout.stride)?)?;
+    let text = if layout.utf16 {
+        read_utf16_c_string(bytes, offset)?
+    } else {
+        read_c_string(bytes, offset, nls)?
+    };
+    is_plausible_resource_name(&text).then_some(text)
 }
 
 fn is_plausible_resource_name(value: &str) -> bool {
@@ -18213,6 +18656,140 @@ mod tests {
     use crate::audio::AudioConfig;
 
     #[test]
+    fn chinese_text_language_selects_the_face_tagged_for_it() {
+        let faces = |names: &[&str]| names.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let shipped = faces(&[
+            "fonts/SourceHanSans-Medium.ttf",
+            "fonts/SourceHanSansCN-Medium.ttf",
+            "fonts/SourceHanSerif-Medium.ttf",
+        ]);
+        // Traditional Chinese has no face of its own, so it shares the Chinese one.
+        for lang in [TextLang::Cn, TextLang::Tc] {
+            assert_eq!(
+                pick_face(shipped.clone(), lang),
+                Some(PathBuf::from("fonts/SourceHanSansCN-Medium.ttf"))
+            );
+        }
+        assert_eq!(
+            pick_face(shipped, TextLang::Jp),
+            Some(PathBuf::from("fonts/SourceHanSans-Medium.ttf"))
+        );
+    }
+
+    #[test]
+    fn a_fonts_directory_without_a_tagged_face_keeps_the_first_one() {
+        let only = vec![PathBuf::from("fonts/SomeSans.ttf")];
+        for lang in [TextLang::Jp, TextLang::Cn, TextLang::Tc] {
+            assert_eq!(
+                pick_face(only.clone(), lang),
+                Some(PathBuf::from("fonts/SomeSans.ttf"))
+            );
+        }
+        assert_eq!(pick_face(Vec::new(), TextLang::Cn), None);
+    }
+
+    #[test]
+    fn font_style_selects_the_release_face_of_that_style() {
+        let shipped = [
+            PathBuf::from("fonts/SourceHanSans-Medium.ttf"),
+            PathBuf::from("fonts/SourceHanSansCN-Medium.ttf"),
+            PathBuf::from("fonts/SourceHanSerif-Medium.ttf"),
+        ];
+        let picked = |lang, style| pick_face_for(&shipped, lang, Some(style));
+        // Each language keeps its own script: the Chinese 黑体 row reaches the
+        // Chinese sans face, the Japanese one the Japanese sans face.
+        assert_eq!(picked(TextLang::Cn, FaceStyle::Sans), Some(shipped[1].clone()));
+        assert_eq!(picked(TextLang::Tc, FaceStyle::Sans), Some(shipped[1].clone()));
+        assert_eq!(picked(TextLang::Jp, FaceStyle::Sans), Some(shipped[0].clone()));
+        // Both languages share the one serif face.
+        for lang in [TextLang::Jp, TextLang::Cn, TextLang::Tc] {
+            assert_eq!(picked(lang, FaceStyle::Serif), Some(shipped[2].clone()));
+        }
+        // No style requested keeps the language's face, as does a style the
+        // release does not ship.
+        assert_eq!(
+            pick_face_for(&shipped, TextLang::Cn, None),
+            Some(shipped[1].clone())
+        );
+        let sans_only = [PathBuf::from("fonts/SourceHanSansCN-Medium.ttf")];
+        assert_eq!(
+            pick_face_for(&sans_only, TextLang::Cn, Some(FaceStyle::Serif)),
+            Some(sans_only[0].clone())
+        );
+    }
+
+    #[test]
+    fn font_type_names_the_face_style_of_a_localized_release() {
+        assert_eq!(FaceStyle::from_font_type(0), Some(FaceStyle::Serif));
+        assert_eq!(FaceStyle::from_font_type(1), Some(FaceStyle::Sans));
+        // The bitmap type of the original releases and the remaining types
+        // name no shipped face.
+        for font_type in [2, 3, 4, 17] {
+            assert_eq!(FaceStyle::from_font_type(font_type), None);
+        }
+    }
+
+    /// The SYSTEM screen's 文本字体 row stores a PAL font type; a release that
+    /// ships those faces switches the text face when that type is applied.
+    #[test]
+    fn font_type_switch_selects_the_release_face_of_that_style() {
+        let root = std::env::temp_dir().join("sena_rs_face_style_test");
+        let fonts = root.join("fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        let shipped = [
+            "SourceHanSans-Medium.ttf",
+            "SourceHanSansCN-Medium.ttf",
+            "SourceHanSerif-Medium.ttf",
+        ];
+        for name in shipped {
+            std::fs::write(fonts.join(name), include_bytes!("default.ttf")).unwrap();
+        }
+        let (assets, points) = empty_core_assets(true);
+        let mut runtime = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        runtime.text_lang = TextLang::Cn;
+        runtime.font_face_candidates = game_font_faces(Some(&root), None);
+        assert_eq!(runtime.font_face_candidates.len(), 3);
+        // Boot picked the Chinese face; the row then stores 宋体 (type 0).
+        runtime.loaded_face_path = Some(fonts.join(shipped[1]));
+        runtime.style_faces_enabled = true;
+        runtime.stack.push(0);
+        let outcome =
+            runtime.dispatch_extcall(9, 17, &[], &assets, &points, None, None, None, None, None);
+        assert!(matches!(outcome, ExtCallOutcome::Value(1)));
+        assert!(runtime.stack.is_empty(), "the font type argument is consumed");
+        assert_eq!(runtime.font_state.font_type(), 0);
+        assert_eq!(runtime.loaded_face_path, Some(fonts.join(shipped[2])));
+        assert!(runtime.text_state.dirty, "the parked line re-typesets");
+        // 黑体 (type 1) goes back to the Chinese sans face.
+        runtime.stack.push(1);
+        runtime.dispatch_extcall(9, 17, &[], &assets, &points, None, None, None, None, None);
+        assert_eq!(runtime.loaded_face_path, Some(fonts.join(shipped[1])));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The original releases have one face at most, so a font type leaves it
+    /// alone even where a caller named one.
+    #[test]
+    fn font_type_leaves_a_single_face_release_alone() {
+        let root = std::env::temp_dir().join("sena_rs_face_style_single_test");
+        let fonts = root.join("fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        let face = fonts.join("SomeSansCN.ttf");
+        std::fs::write(&face, include_bytes!("default.ttf")).unwrap();
+        let (assets, points) = empty_core_assets(false);
+        let mut runtime = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        runtime.text_lang = TextLang::Cn;
+        runtime.font_face_candidates = vec![face.clone()];
+        runtime.loaded_face_path = Some(face.clone());
+        runtime.stack.push(0);
+        let dirty = runtime.text_state.dirty;
+        runtime.dispatch_extcall(9, 17, &[], &assets, &points, None, None, None, None, None);
+        assert_eq!(runtime.loaded_face_path, Some(face));
+        assert_eq!(runtime.text_state.dirty, dirty);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn script_priority_cursor_layers_popup_over_existing_buttons() {
         let mut sprites = SpriteSystem::new();
         let menu_button = sprites
@@ -18375,8 +18952,14 @@ mod tests {
 
     #[test]
     fn pgd_default_offsets_use_native_stage_coordinates() {
-        let (x, y, z) = native_place_sprite(5, 0xFFFF, 0xFFFF, 70, 464, 144, 408, 288);
+        let (x, y, z) =
+            native_place_sprite(5, 0xFFFF, 0xFFFF, 70, 464, 144, 408, 288, 1280, 720);
         assert_eq!((x, y, z), (612.0, 432.0, 70.0));
+        // The FHD releases author the same artwork and its default offsets in
+        // their own 1920x1080 stage, so there the offsets are already native.
+        let (x, y, z) =
+            native_place_sprite(5, 0xFFFF, 0xFFFF, 70, 634, 208, 627, 370, 1920, 1080);
+        assert_eq!((x, y, z), (627.0, 370.0, 70.0));
     }
 
     #[test]
@@ -18532,6 +19115,8 @@ mod tests {
             mem_dat: empty_asset("Mem.dat"),
             point_dat: empty_asset("Point.dat"),
             graphic_dat: None,
+            text_dat_multilingual: false,
+            file_dat_layout: FileDatLayout::default(),
             script_check_value: 0,
             script_entry_pc: 12,
             extended_softpal: false,
@@ -18549,6 +19134,76 @@ mod tests {
         assert!(matches!(first, ExtCallOutcome::Value(1_000)));
         assert!(matches!(second, ExtCallOutcome::Value(1_088)));
         assert_eq!(runtime.stack, [42]);
+    }
+
+    /// Minimal asset set for extcalls that only consult runtime state.
+    fn empty_core_assets(multilingual: bool) -> (CoreAssets, PointTable) {
+        let empty_asset = |name: &str| LoadedAsset {
+            name: name.to_owned(),
+            bytes: Vec::new(),
+            source: AssetSource::Loose {
+                path: PathBuf::from(name),
+            },
+        };
+        let points = PointTable::parse(&[]).unwrap();
+        let assets = CoreAssets {
+            script: empty_asset("Script.src"),
+            file_dat: empty_asset("File.dat"),
+            text_dat: empty_asset("Text.dat"),
+            mem_dat: empty_asset("Mem.dat"),
+            point_dat: empty_asset("Point.dat"),
+            graphic_dat: None,
+            text_dat_multilingual: multilingual,
+            file_dat_layout: FileDatLayout::default(),
+            script_check_value: 0,
+            script_entry_pc: 12,
+            extended_softpal: false,
+            point_table: points.clone(),
+            graphic_index: None,
+        };
+        (assets, points)
+    }
+
+    #[test]
+    fn language_switch_extcall_selects_the_pressed_field() {
+        let (assets, points) = empty_core_assets(true);
+        let mut runtime = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        runtime.set_text_lang(TextLang::Cn);
+        // The SYSTEM language row passes the picked text field: 2 = traditional.
+        runtime.stack.push(2);
+        let outcome =
+            runtime.dispatch_extcall(9, 60, &[], &assets, &points, None, None, None, None, None);
+        assert!(matches!(outcome, ExtCallOutcome::Value(1)));
+        assert!(runtime.stack.is_empty(), "the field argument is consumed");
+        assert_eq!(runtime.text_lang, TextLang::Tc);
+        assert!(runtime.text_state.dirty, "the parked line re-typesets");
+    }
+
+    #[test]
+    fn unset_language_field_keeps_the_configured_language() {
+        let (assets, points) = empty_core_assets(true);
+        let mut runtime = ScriptRuntime::boot(12, ScriptRuntimeConfig::default());
+        runtime.set_text_lang(TextLang::Cn);
+        // A fresh install stores 0 in the script's setting and the boot path
+        // calls the extcall with it; the host's configured language stands.
+        runtime.stack.push(0);
+        let outcome =
+            runtime.dispatch_extcall(9, 60, &[], &assets, &points, None, None, None, None, None);
+        assert!(matches!(outcome, ExtCallOutcome::Value(1)));
+        assert!(runtime.stack.is_empty());
+        assert_eq!(runtime.text_lang, TextLang::Cn);
+    }
+
+    #[test]
+    fn text_language_field_index_round_trips() {
+        for lang in [TextLang::Jp, TextLang::Cn, TextLang::Tc] {
+            assert_eq!(
+                TextLang::from_field_index(lang.field_index() as i32),
+                Some(lang)
+            );
+        }
+        assert_eq!(TextLang::from_field_index(-1), None);
+        assert_eq!(TextLang::from_field_index(3), None);
     }
 
     #[test]
@@ -18698,6 +19353,7 @@ mod tests {
             text_args: [12, 13, 14, 15],
             text_base: 16,
             text_mode: 17,
+            text_alpha: Some(200),
             text_visible: true,
             resume_wait_click: true,
             vars: vec![21, 22],
@@ -18747,11 +19403,12 @@ mod tests {
         assert_eq!(restored.text_args, snapshot.text_args);
         assert_eq!(restored.text_base, snapshot.text_base);
         assert_eq!(restored.text_mode, snapshot.text_mode);
+        assert_eq!(restored.text_alpha, Some(200));
         assert_eq!(restored.text_visible, snapshot.text_visible);
         assert_eq!(restored.vars, snapshot.vars);
         assert_eq!(restored.argument_base, 64);
         assert_eq!(restored.title_bytes, b"line");
-        assert_eq!(restored.version, 6);
+        assert_eq!(restored.version, 7);
         assert!(restored.resume_wait_click);
         assert_eq!(restored.sprites.len(), 1);
         let sprite = &restored.sprites[0];
@@ -18776,8 +19433,39 @@ mod tests {
         let older = decode_runtime_save_snapshot(&mut older_bytes.as_slice()).expect("read v2");
         assert_eq!(older.version, 2);
         assert!(!older.resume_wait_click);
+        assert_eq!(older.text_alpha, None, "a save without the field has no alpha");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restored_save_keeps_the_adv_window_alpha() {
+        let mut runtime = ScriptRuntime::boot(0x1000, ScriptRuntimeConfig::default());
+        runtime.text_state.alpha = 137;
+        let snapshot = runtime.capture_save_snapshot();
+        assert_eq!(snapshot.version, 7);
+        let mut bytes = encode_runtime_save_snapshot(&snapshot).expect("encode the save");
+        let decoded = decode_runtime_save_snapshot(&mut bytes.as_slice()).expect("decode the save");
+        assert_eq!(decoded.text_alpha, Some(137));
+
+        runtime.text_state.alpha = 0;
+        runtime.restore_save_snapshot(decoded);
+        assert_eq!(
+            runtime.text_state.alpha, 137,
+            "a restored ADV window keeps the opacity the save recorded"
+        );
+
+        // Saves written before the field existed leave the window shown: alpha
+        // 0 would paint the base panel away and drop the text onto the CG.
+        let mut legacy = RuntimeSaveSnapshot {
+            version: 6,
+            text_alpha: None,
+            ..RuntimeSaveSnapshot::default()
+        };
+        legacy.pc = 0x2000;
+        runtime.text_state.alpha = 0;
+        runtime.restore_save_snapshot(legacy);
+        assert_eq!(runtime.text_state.alpha, 255);
     }
 
     #[test]
@@ -19253,6 +19941,8 @@ mod tests {
                 },
             },
             graphic_dat: None,
+            text_dat_multilingual: false,
+            file_dat_layout: FileDatLayout::default(),
             script_check_value: 0,
             script_entry_pc: 0x100,
             extended_softpal: false,

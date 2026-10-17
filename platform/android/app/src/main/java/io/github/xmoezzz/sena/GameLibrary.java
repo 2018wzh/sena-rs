@@ -63,7 +63,8 @@ public final class GameLibrary {
                         o.optString("rootPath"),
                         o.optLong("addedAt", 0L),
                         o.optString("coverPath", null),
-                        o.optString("nls", NlsOption.SHIFT_JIS.value)
+                        o.optString("nls", NlsOption.SHIFT_JIS.value),
+                        o.optString("lang", LangOption.DEFAULT.value)
                 ));
             }
             return out;
@@ -84,6 +85,7 @@ public final class GameLibrary {
                 o.put("coverPath", e.coverPath);
             }
             o.put("nls", NlsOption.fromValue(e.nls).value);
+            o.put("lang", LangOption.fromValue(e.lang).value);
             arr.put(o);
         }
         byte[] data = arr.toString(2).getBytes(StandardCharsets.UTF_8);
@@ -99,7 +101,7 @@ public final class GameLibrary {
      *
      * The caller then records the draft via {@link #addImportedGame(ImportedGameDraft)}.
      */
-    public ImportedGameDraft importFromTreeUri(Uri treeUri, String nls) throws Exception {
+    public ImportedGameDraft importFromTreeUri(Uri treeUri, String nls, String lang) throws Exception {
         DocumentFile tree = DocumentFile.fromTreeUri(ctx, treeUri);
         if (tree == null || !tree.isDirectory()) {
             throw new IllegalArgumentException("Selected URI is not a directory");
@@ -124,7 +126,8 @@ public final class GameLibrary {
                 directRoot.getAbsolutePath(),
                 System.currentTimeMillis(),
                 info.coverPath,
-                NlsOption.fromValue(nls).value
+                NlsOption.fromValue(nls).value,
+                LangOption.fromValue(lang).value
         );
     }
 
@@ -172,7 +175,7 @@ public final class GameLibrary {
             throw new IllegalArgumentException("draft is null");
         }
 
-        GameEntry entry = new GameEntry(draft.id, draft.title, draft.rootPath, draft.addedAtEpochMs, draft.coverPath, draft.nls);
+        GameEntry entry = new GameEntry(draft.id, draft.title, draft.rootPath, draft.addedAtEpochMs, draft.coverPath, draft.nls, draft.lang);
 
         List<GameEntry> all = load();
         all.add(0, entry);
@@ -187,7 +190,21 @@ public final class GameLibrary {
         for (int i = 0; i < all.size(); i++) {
             GameEntry e = all.get(i);
             if (e.id.equals(entry.id)) {
-                all.set(i, new GameEntry(e.id, e.title, e.rootPath, e.addedAtEpochMs, e.coverPath, value));
+                all.set(i, new GameEntry(e.id, e.title, e.rootPath, e.addedAtEpochMs, e.coverPath, value, e.lang));
+                break;
+            }
+        }
+        save(all);
+    }
+
+    public void updateLang(GameEntry entry, String lang) throws Exception {
+        if (entry == null) return;
+        List<GameEntry> all = load();
+        String value = LangOption.fromValue(lang).value;
+        for (int i = 0; i < all.size(); i++) {
+            GameEntry e = all.get(i);
+            if (e.id.equals(entry.id)) {
+                all.set(i, new GameEntry(e.id, e.title, e.rootPath, e.addedAtEpochMs, e.coverPath, e.nls, value));
                 break;
             }
         }
@@ -202,14 +219,16 @@ public final class GameLibrary {
         public final long addedAtEpochMs;
         @Nullable public final String coverPath;
         public final String nls;
+        public final String lang;
 
-        public ImportedGameDraft(String id, String title, String rootPath, long addedAtEpochMs, @Nullable String coverPath, String nls) {
+        public ImportedGameDraft(String id, String title, String rootPath, long addedAtEpochMs, @Nullable String coverPath, String nls, String lang) {
             this.id = id;
             this.title = title;
             this.rootPath = rootPath;
             this.addedAtEpochMs = addedAtEpochMs;
             this.coverPath = coverPath;
             this.nls = NlsOption.fromValue(nls).value;
+            this.lang = LangOption.fromValue(lang).value;
         }
     }
 
