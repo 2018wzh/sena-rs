@@ -39,6 +39,10 @@ It creates no window or event loop. Input coordinates must use that raster's siz
 
 `AudioSystem::suspend` / `unsuspend` preserve script-paused channels. A caller that
 pauses engine scheduling must also suspend audio and discard paused wall time.
+On native targets `AudioSystem::shutdown` joins Kira's CPAL stream-management
+worker; its owner-thread destructor provides the same cleanup on early errors.
+Kira remains version 0.12.1, pinned to the narrowly patched native-owner fork.
+Sena uses synchronously decoded `StaticSoundData`, not Kira streaming decoders.
 `ScriptRuntime::load_generation` identifies successful native save restores.
 Platform owners drain `system_state_mut().take_window_requests()` and confirm actual
 geometry with `confirm_window_geometry`; this never changes the renderer size.

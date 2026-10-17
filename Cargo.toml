@@ -22,7 +22,7 @@ pollster = "0.4"
 bytemuck = { version = "1.23", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
-kira = "0.12.1"
+kira = { version = "=0.12.1", git = "https://github.com/2018wzh/kira.git", rev = "523790dbb7ddea5ca432f375a9f3180923f2ea1e" }
 ab_glyph = "0.2"
 softbuffer = "0.4.8"
 wmv-decoder = { path = "crates/na_wmv_player", default-features = false, features = ["video-only", "audio"] }

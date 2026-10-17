@@ -29,6 +29,18 @@ pub struct AudioSystem {
 }
 
 impl AudioSystem {
+    /// Stop the native backend and wait for its stream-management worker.
+    /// Call on the game owner thread, never from an audio callback.
+    pub fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.enabled = false;
+        if let Some(mut manager) = self.manager.take() {
+            #[cfg(not(target_arch = "wasm32"))]
+            manager.backend_mut().stop_and_join()?;
+            drop(manager);
+        }
+        Ok(())
+    }
+
     pub fn new(config: AudioConfig) -> anyhow::Result<Self> {
         let manager = if config.enabled {
             match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {
@@ -523,6 +535,14 @@ impl AudioSystem {
         slots
             .get_mut(handle.index)
             .ok_or_else(|| anyhow::anyhow!("audio handle {:?} points outside its group", handle))
+    }
+}
+
+impl Drop for AudioSystem {
+    fn drop(&mut self) {
+        if let Err(error) = self.shutdown() {
+            log::error!("native audio shutdown failed after joining its worker: {error:#}");
+        }
     }
 }
 
