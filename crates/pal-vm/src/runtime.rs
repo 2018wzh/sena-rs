@@ -6736,6 +6736,11 @@ impl ScriptRuntime {
                         self.pc,
                         scene.sprites.len()
                     );
+                    // A fresh title session has no armed savepoint. Keep the
+                    // loaded scene as its new baseline, not an outgoing line.
+                    self.save_state.resume_checkpoint = None;
+                    self.save_state.checkpoint = Some(scene);
+                    self.save_state.armed = true;
                     return if resume_wait_click {
                         ExtCallOutcome::Wait {
                             value: 1,
@@ -6768,6 +6773,9 @@ impl ScriptRuntime {
                     log::debug!(
                         "[trace-save] load slot={slot} imported original save, resume pc=0x{resume_pc:08X}"
                     );
+                    self.save_state.resume_checkpoint = None;
+                    self.save_state.checkpoint = Some(scene);
+                    self.save_state.armed = true;
                     return ExtCallOutcome::Value(1);
                 }
                 let has_file = resource_manager
@@ -19522,6 +19530,27 @@ mod tests {
         assert_eq!(runtime.take_modal_wait_repark(), None);
         assert!(runtime.modal_wait_suspensions.is_empty());
         assert!(matches!(runtime.status, RuntimeStatus::Running { .. }));
+    }
+
+    #[test]
+    fn loading_into_a_fresh_runtime_rearms_saving() {
+        let (assets, _) = empty_core_assets(false);
+        let mut runtime = ScriptRuntime::boot(0x1000, ScriptRuntimeConfig::default());
+        let checkpoint = runtime.capture_save_snapshot();
+        runtime.save_state.snapshots.insert(0, checkpoint);
+        runtime.pc = 0x2000;
+        runtime.save_state.resume_checkpoint = Some(runtime.capture_save_snapshot());
+        runtime.stack.push(0);
+        let outcome = runtime.dispatch_save_stub(1, &assets, Nls::ShiftJis, None, None);
+        assert!(matches!(outcome, ExtCallOutcome::Value(1)));
+        assert!(runtime.save_state.armed, "a loaded game must remain saveable");
+        assert!(runtime.save_state.resume_checkpoint.is_none());
+        assert_eq!(runtime.save_state.checkpoint.as_ref().unwrap().pc, 0x1000);
+        runtime.stack.push(0);
+        runtime.stack.push(1);
+        let outcome = runtime.dispatch_save_stub(0, &assets, Nls::ShiftJis, None, None);
+        assert!(matches!(outcome, ExtCallOutcome::Value(1)));
+        assert_eq!(runtime.save_state.snapshots.get(&1).unwrap().pc, 0x1000);
     }
 
     #[test]

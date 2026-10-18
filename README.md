@@ -44,6 +44,9 @@ worker; its owner-thread destructor provides the same cleanup on early errors.
 Kira remains version 0.12.1, pinned to the narrowly patched native-owner fork.
 Sena uses synchronously decoded `StaticSoundData`, not Kira streaming decoders.
 `ScriptRuntime::load_generation` identifies successful native save restores.
+Successful portable and original-save loads re-arm saving from the loaded
+checkpoint, including loads made from a fresh title session. Subsequent saves
+do not require an earlier in-session savepoint or retain an outgoing scene.
 Platform owners drain `system_state_mut().take_window_requests()` and confirm actual
 geometry with `confirm_window_geometry`; this never changes the renderer size.
 
