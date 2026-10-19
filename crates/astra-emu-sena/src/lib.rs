@@ -87,9 +87,10 @@ unsafe extern "C" fn describe(output: *mut Descriptor, error: *mut Error) -> Sta
         initialized()?;
         *destination(output)? = Descriptor {
             header: Header::of::<Descriptor>(), family_id: text("softpal"), plugin_id: text("sena-native-koikake"),
-            version: text(env!("CARGO_PKG_VERSION")), capabilities: CAP_CPU_SURFACE,
+            version: text(env!("CARGO_PKG_VERSION")), capabilities: CAP_CPU_SURFACE | CAP_RENDER_EXTENT,
             formats: FORMATS.0.as_ptr(), format_count: FORMATS.0.len(),
             configuration: config::SCHEMA.0.as_ptr(), configuration_count: config::SCHEMA.0.len(),
+            display_name: text("Sena"), family_name: text("SoftPAL"), render: config::RENDER,
         };
         Ok(())
     })

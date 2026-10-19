@@ -9,26 +9,25 @@ struct Choices([Bytes; 3]);
 // All pointers refer to immutable library-lifetime strings.
 unsafe impl Sync for Choices {}
 static LANGUAGES: Choices = Choices([text("jp"), text("cn"), text("tc")]);
-pub struct Schema(pub [ConfigField; 3]);
+static LANGUAGE_LABELS: Choices = Choices([text("日文"), text("简体中文"), text("繁体中文")]);
+pub struct Schema(pub [ConfigField; 1]);
 unsafe impl Sync for Schema {}
-const fn dimension(id: &'static str, label: &'static str, default: i64) -> ConfigField {
-    ConfigField {
-        id: text(id), label: text(label), group: text("Renderer"),
-        default_value: ConfigValue { kind: VALUE_INTEGER, reserved: 0, integer: default, number: 0.0, text: Bytes::EMPTY },
-        integer_min: 320, integer_max: 3840, number_min: 0.0, number_max: 0.0,
-        max_bytes: 0, reserved: 0, choices: std::ptr::null(), choice_count: 0,
-    }
-}
-pub static SCHEMA: Schema = Schema([
-    dimension("raster_width", "Raster width", 1280),
-    dimension("raster_height", "Raster height", 720),
-    ConfigField {
-        id: text("text_language"), label: text("Native text language"), group: text("Game"),
-        default_value: ConfigValue { kind: VALUE_ENUM, reserved: 0, integer: 0, number: 0.0, text: text("jp") },
-        integer_min: 0, integer_max: 0, number_min: 0.0, number_max: 0.0,
-        max_bytes: 0, reserved: 0, choices: LANGUAGES.0.as_ptr(), choice_count: 3,
-    },
-]);
+pub static SCHEMA: Schema = Schema([ConfigField {
+    id: text("text_language"), label: text("文本语言"), group: text("语言"),
+    default_value: ConfigValue { kind: VALUE_ENUM, reserved: 0, integer: 0, number: 0.0, text: text("jp") },
+    integer_min: 0, integer_max: 0, number_min: 0.0, number_max: 0.0,
+    max_bytes: 0, flags: 0, choices: LANGUAGES.0.as_ptr(), choice_count: 3,
+    description: text("选择游戏读取的原生文本与字体语言，需要游戏资源包含对应语言，启动时生效。"),
+    choice_labels: LANGUAGE_LABELS.0.as_ptr(), step: 0.0, unit: Bytes::EMPTY,
+}]);
+pub const DEFAULT_RASTER: Extent = Extent { width: 1280, height: 720 };
+pub const RENDER: RenderExtentSupport = RenderExtentSupport {
+    min: Extent { width: 320, height: 320 },
+    max: Extent { width: 3840, height: 3840 },
+    default: DEFAULT_RASTER,
+    flags: 0,
+    reserved: 0,
+};
 #[derive(Clone)]
 pub struct Settings {
     pub root: PathBuf,
@@ -40,11 +39,11 @@ impl Settings {
     pub unsafe fn read(request: &OpenRequest) -> Result<Self, Status> {
         let values = borrowed_array(request.configuration, request.configuration_count, MAX_CONFIG_FIELDS)?;
         validate_config(&SCHEMA.0, values).map_err(|_| INVALID_ARGUMENT)?;
-        let mut result = Self { root: game_root(request.game_path.text(32768)?), width: 1280, height: 720, language: TextLang::Jp };
+        RENDER.validate_request(CAP_RENDER_EXTENT, request.render_extent)?;
+        let raster = if request.render_extent == Extent::default() { DEFAULT_RASTER } else { request.render_extent };
+        let mut result = Self { root: game_root(request.game_path.text(32768)?), width: raster.width, height: raster.height, language: TextLang::Jp };
         for entry in values {
             match entry.id.text(128)? {
-                "raster_width" => result.width = entry.value.integer as u32,
-                "raster_height" => result.height = entry.value.integer as u32,
                 "text_language" => result.language = match entry.value.text.text(128)? {
                     "jp" => TextLang::Jp, "cn" => TextLang::Cn, "tc" => TextLang::Tc,
                     _ => return Err(INVALID_ARGUMENT),
@@ -85,7 +84,7 @@ pub fn matches_game(root: &Path) -> bool {
 pub fn surface(settings: &Settings, width: u32, height: u32) -> SurfaceInfo {
     SurfaceInfo {
         kind: SURFACE_CPU, pixel_format: PIXEL_RGBA8, color: COLOR_SRGB,
-        alpha: ALPHA_OPAQUE, rows: ROWS_TOP_DOWN, backend: 0,
+        alpha: ALPHA_OPAQUE, rows: ROWS_TOP_DOWN,
         logical: Extent { width, height },
         raster: Extent { width: settings.width, height: settings.height },
         stride: u64::from(settings.width) * 4,

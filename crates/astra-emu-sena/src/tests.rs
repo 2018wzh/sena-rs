@@ -15,17 +15,47 @@ fn query_returns_the_same_complete_table() {
 }
 
 #[test]
-fn startup_schema_rejects_unknown_and_out_of_range_values() {
+fn descriptor_declares_names_and_render_extent() {
+    let diagnostics = Diagnostics { header: Header::of::<Diagnostics>(), context: std::ptr::null_mut(),
+        emit: Some(emit), flush: Some(flush) };
+    unsafe extern "C" fn emit(_: *mut c_void, _: *const LogRecord) {}
+    unsafe extern "C" fn flush(_: *mut c_void) {}
+    unsafe {
+        assert_eq!(initialize(&diagnostics, std::ptr::null_mut()), OK);
+        let mut descriptor = std::mem::zeroed::<Descriptor>();
+        assert_eq!(describe(&mut descriptor, std::ptr::null_mut()), OK);
+        assert_eq!(descriptor.validate(), Ok(()));
+        assert_eq!(descriptor.display_name.text(64), Ok("Sena"));
+        assert_eq!(descriptor.family_name.text(64), Ok("SoftPAL"));
+        assert_eq!(descriptor.capabilities, CAP_CPU_SURFACE | CAP_RENDER_EXTENT);
+        assert_eq!(descriptor.render, config::RENDER);
+        let schema = std::slice::from_raw_parts(descriptor.configuration, descriptor.configuration_count);
+        assert_eq!(validate_config(schema, &[]), Ok(()));
+    }
+}
+
+#[test]
+fn render_extent_requests_stay_within_declared_range() {
+    let capabilities = CAP_CPU_SURFACE | CAP_RENDER_EXTENT;
+    assert_eq!(config::RENDER.validate(capabilities), Ok(()));
+    assert_eq!(config::RENDER.validate_request(capabilities, Extent::default()), Ok(()));
+    assert_eq!(config::RENDER.validate_request(capabilities, Extent { width: 3840, height: 320 }), Ok(()));
+    assert_eq!(config::RENDER.validate_request(capabilities, Extent { width: 3841, height: 720 }), Err(INVALID_ARGUMENT));
+    assert_eq!(config::RENDER.validate_request(capabilities, Extent { width: 1280, height: 319 }), Err(INVALID_ARGUMENT));
+}
+
+#[test]
+fn startup_schema_rejects_unknown_and_invalid_values() {
     unsafe {
         assert_eq!(validate_config(&config::SCHEMA.0, &[]), Ok(()));
-        let mut entry = ConfigEntry { id: text("raster_width"), value: ConfigValue {
-            kind: VALUE_INTEGER, reserved: 0, integer: 3840, number: 0.0, text: Bytes::EMPTY,
+        let mut entry = ConfigEntry { id: text("text_language"), value: ConfigValue {
+            kind: VALUE_ENUM, reserved: 0, integer: 0, number: 0.0, text: text("tc"),
         }};
         assert_eq!(validate_config(&config::SCHEMA.0, &[entry]), Ok(()));
-        entry.value.integer = 3841;
+        entry.value.text = text("en");
         assert!(validate_config(&config::SCHEMA.0, &[entry]).is_err());
-        entry.value.integer = 1280;
-        entry.id = text("window_width");
+        entry.value.text = text("jp");
+        entry.id = text("raster_width");
         assert!(validate_config(&config::SCHEMA.0, &[entry]).is_err());
     }
 }

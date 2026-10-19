@@ -57,8 +57,8 @@ not a general SoftPAL compatibility claim. Its base is upstream
 `37ab17558e0c7d26ebfb1dccfa981ba529a6630b`; generic offscreen/lifetime changes are on
 the fork's `master`. The original MPL-2.0 source and history remain intact.
 
-The descriptor identifies the engine as `family_id = "softpal"` and this emulator
-as `plugin_id = "sena-native-koikake"`. These are independent identities: another
+The descriptor identifies the engine as `family_id = "softpal"` (shown as `SoftPAL`) and
+this emulator as `plugin_id = "sena-native-koikake"` (shown as `Sena`). These are independent identities: another
 SoftPAL emulator may coexist under its own plugin ID. This does not expand Sena's
 supported-title range or change its native save identity.
 
@@ -81,8 +81,9 @@ offscreen and exports at most three independently owned immutable RGBA8 leases.
 Leases remain releasable after close; close cancels platform services and joins
 the worker before returning, permitting a new session in the same process.
 
-`raster_width` / `raster_height` are startup-only (320–3840, defaults 1280×720).
-`text_language` selects the native `jp` / `cn` / `tc` archive/text field.
+The descriptor declares `CAP_RENDER_EXTENT` (320×320–3840×3840, default 1280×720,
+aspect not preserved); the host-requested `render_extent` is startup-only and 0×0
+selects 1280×720. `text_language` selects the native `jp` / `cn` / `tc` archive/text field.
 The descriptor reports actual logical L and raster R; Manager resize affects O
 without changing R. Pointer input is in displayed R pixels and goes through
 Sena's existing coordinate conversion once. Save restoration invalidates queued
