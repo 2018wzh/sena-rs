@@ -18046,6 +18046,10 @@ fn read_text_record_string(bytes: &[u8], offset: usize, nls: Nls, multilingual: 
 /// Used by the FHD text layout, whose records are UTF-16LE; the original
 /// single-byte layout would stop at the high byte of the first character.
 fn read_utf16_c_string(bytes: &[u8], offset: usize) -> Option<String> {
+    read_utf16_c_string_with_end(bytes, offset).map(|(text, _)| text)
+}
+
+fn read_utf16_c_string_with_end(bytes: &[u8], offset: usize) -> Option<(String, Option<usize>)> {
     if offset >= bytes.len() {
         return None;
     }
@@ -18054,12 +18058,47 @@ fn read_utf16_c_string(bytes: &[u8], offset: usize) -> Option<String> {
     while position + 2 <= bytes.len() {
         let unit = u16::from_le_bytes([bytes[position], bytes[position + 1]]);
         if unit == 0 {
-            break;
+            return Some((String::from_utf16_lossy(&units), Some(position + 2)));
         }
         units.push(unit);
         position += 2;
     }
-    Some(String::from_utf16_lossy(&units))
+    Some((String::from_utf16_lossy(&units), None))
+}
+
+/// Inspect native multilingual records and the corresponding boot font without
+/// constructing a runtime, executing code, initializing devices, or writing.
+pub fn visit_multilingual_text_data(
+    bytes: &[u8],
+    lang: TextLang,
+    root: &Path,
+    mut visit: impl FnMut(u32, &str, &str),
+) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(
+        crate::assets::multilingual_text_table(bytes),
+        "text_data_not_multilingual"
+    );
+    let face = pick_face_for(&game_font_faces(Some(root), None), lang, None)
+        .ok_or_else(|| anyhow::anyhow!("text_data_no_native_face"))?;
+    let mut position = 16usize;
+    let mut previous_id: Option<u32> = None;
+    while position < bytes.len() {
+        let end = position.checked_add(4)
+            .ok_or_else(|| anyhow::anyhow!("text_data_offset_overflow"))?;
+        let header = bytes.get(position..end)
+            .ok_or_else(|| anyhow::anyhow!("text_data_truncated_id"))?;
+        let id = u32::from_le_bytes(header.try_into().expect("4-byte slice"));
+        if let Some(previous) = previous_id {
+            anyhow::ensure!(previous.checked_add(1) == Some(id), "text_data_nonconsecutive_id");
+        }
+        previous_id = Some(id);
+        let (raw, end) = read_utf16_c_string_with_end(bytes, end)
+            .ok_or_else(|| anyhow::anyhow!("text_data_missing_record"))?;
+        position = end.ok_or_else(|| anyhow::anyhow!("text_data_unterminated_record"))?;
+        let selected = select_text_field(raw.clone(), lang, true);
+        visit(id, &raw, &selected);
+    }
+    Ok(face)
 }
 
 /// Pick this language's field out of a multi-language text record.

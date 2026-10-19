@@ -89,6 +89,12 @@ Sena's existing coordinate conversion once. Save restoration invalidates queued
 input and frame identity. Pause stops PAL time and suspends playing Kira channels.
 No text/resource Hook or host audio mixer is used.
 
+`pal_vm::runtime::visit_multilingual_text_data` exposes read-only data inspection
+through the same UTF-16 record decoder, `TextLang` field selector and boot font
+picker used by the runtime. It visits complete records and returns the selected
+font path without creating a Runtime, running bytecode, initializing devices or
+writing files. Archive-name NLS remains separate from the text language.
+
 Prerequisites are a real native GPU and Kira audio device, a window-capable host,
 and complete Koikake resources/fonts. The probe recognizes `koikake.exe`, or
 `Game.exe` with `steam_appid.txt` containing Koikake's Steam app ID `2242710`.
