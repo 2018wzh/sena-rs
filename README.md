@@ -63,7 +63,7 @@ SoftPAL emulator may coexist under its own plugin ID. This does not expand Sena'
 supported-title range or change its native save identity.
 
 Build from this standalone fork or AstraEngine's native checkout. The shared ABI
-is pinned to Git revision `15a39a626b1316cb6137a75e17e14a2ff2d1ba88` (C ABI 2); no host directory
+is pinned to Git revision `6799938dc33b25bcca4d9a11ddbea1366bf7d93c` (C ABI 3); no host directory
 layout is required. Kira 0.12.1 is pinned to
 `523790dbb7ddea5ca432f375a9f3180923f2ea1e` with explicit native CPAL worker shutdown:
 
