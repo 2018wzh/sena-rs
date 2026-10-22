@@ -193,7 +193,7 @@ fn slots_are_utf16(bytes: &[u8], stride: usize) -> bool {
 /// ids must stay consecutive and every string must terminate on a UTF-16 code
 /// unit boundary. A single-byte pool fails on its first record, because the
 /// string terminator and the next record's id are not code-unit aligned.
-fn multilingual_text_table(bytes: &[u8]) -> bool {
+pub(crate) fn multilingual_text_table(bytes: &[u8]) -> bool {
     if bytes.len() < 16 || &bytes[..12] != b"$TEXT_LIST__" {
         return false;
     }

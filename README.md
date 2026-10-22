@@ -50,5 +50,66 @@ do not require an earlier in-session savepoint or retain an outgoing scene.
 Platform owners drain `system_state_mut().take_window_requests()` and confirm actual
 geometry with `confirm_window_geometry`; this never changes the renderer size.
 
+## Astra Embedded
+
+The `astra` branch is one adaptation commit on fork commit
+`5fd1a8e37600fb917e053f633671560df9ca42a7`, which is upstream
+`37ab17558e0c7d26ebfb1dccfa981ba529a6630b` plus generic offscreen/lifetime and save
+fixes. It adds `crates/astra-emu-sena-rs`, a thin C ABI adapter for **Koikake**, not a
+general SoftPAL compatibility claim. The original MPL-2.0 source and history remain intact.
+
+The descriptor identifies the engine as `family_id = "softpal"` (shown as `SoftPAL`) and
+this emulator as `plugin_id = "sena-rs"`, the upstream repository name (shown as `Sena`). These are independent identities: another
+SoftPAL emulator may coexist under its own plugin ID. This does not expand Sena's
+supported-title range or change its native save identity.
+
+Build from this standalone fork or AstraEngine's native checkout. The shared ABI
+is pinned to Git revision `6d9d691dcc8f3d768e40b5be1d6f37366cca62d8` (C ABI 3); no host directory
+layout is required. Kira 0.12.1 is pinned to
+`523790dbb7ddea5ca432f375a9f3180923f2ea1e` with explicit native CPAL worker shutdown:
+
+```bash
+cargo build --release -p astra-emu-sena-rs --features diagnostic-bridge
+cargo test -p astra-emu-sena-rs --lib
+```
+
+Dynamic loading exports `astra_emu_query` and installs the shared diagnostics bridge.
+Static linking uses `astra_emu_sena_rs::QUERY` without `diagnostic-bridge`, reusing the
+host logger. The Manager owns the sole window/event loop and Present. A dedicated
+native worker retains Sena's 16ms PAL cadence, original VM, game UI, Kira audio,
+movie decoders and native save menus. It renders the complete native wgpu scene
+offscreen and exports at most three independently owned immutable RGBA8 leases.
+Leases remain releasable after close; close cancels platform services and joins
+the worker before returning, permitting a new session in the same process.
+
+The descriptor declares `CAP_RENDER_EXTENT` (320×320–3840×3840, default 1280×720,
+aspect not preserved); the host-requested `render_extent` is startup-only and 0×0
+selects 1280×720. `text_language` selects the native `jp` / `cn` / `tc` archive/text field.
+The descriptor reports actual logical L and raster R; Manager resize affects O
+without changing R. Pointer input is in displayed R pixels and goes through
+Sena's existing coordinate conversion once. Save restoration invalidates queued
+input and frame identity. Pause stops PAL time and suspends playing Kira channels.
+No text/resource Hook or host audio mixer is used.
+
+`pal_vm::runtime::visit_multilingual_text_data` exposes read-only data inspection
+through the same UTF-16 record decoder, `TextLang` field selector and boot font
+picker used by the runtime. It visits complete records and returns the selected
+font path without creating a Runtime, running bytecode, initializing devices or
+writing files. Archive-name NLS remains separate from the text language.
+
+Prerequisites are a real native GPU and Kira audio device, a window-capable host,
+and complete Koikake resources/fonts. The probe recognizes `koikake.exe`, or
+`Game.exe` with `steam_appid.txt` containing Koikake's Steam app ID `2242710`.
+`Game.exe` alone does not identify a supported SoftPAL title. Explicit opening
+also supports an imported resource directory without these markers.
+Native cursor-null is forwarded; upstream cursor-autohide remains only stored
+state because upstream has no timer or documented units. Native aspect-mode sprite
+transforms are retained, not translated into a host resize constraint.
+
+These commands are verification entry points, not a completed playthrough claim.
+Acceptance requires real final-frame comparison with the `sena` command above,
+game-menu save/load, pause/audio, resize/pointer mapping, close/reopen with a held
+CPU lease, and at least one real ending.
+
 ## License
 This project is licensed under the MPL-2.0 License. See [LICENSE](./LICENSE-MPL-2.0) for details.
