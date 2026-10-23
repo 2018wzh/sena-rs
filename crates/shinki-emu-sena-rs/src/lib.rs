@@ -3,7 +3,7 @@ mod config;
 mod platform;
 mod session;
 
-use astra_emu_abi::*;
+use shinki_emu_abi::*;
 use config::text;
 use pal_vm::{InputEvent as NativeInput, MouseButton, PalEvent};
 use session::{Command, SessionOwner};
@@ -39,7 +39,7 @@ static FORMATS: Formats = Formats([text("softpal-koikake")]);
 /// # Safety
 /// A non-null, aligned `output` must point to writable storage for one API pointer.
 #[cfg_attr(feature = "diagnostic-bridge", no_mangle)]
-pub unsafe extern "C" fn astra_emu_query(version: u32, output: *mut *const CoreApi) -> Status {
+pub unsafe extern "C" fn shinki_emu_query(version: u32, output: *mut *const CoreApi) -> Status {
     if output.is_null() || !output.is_aligned() {
         return INVALID_ARGUMENT;
     }
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn astra_emu_query(version: u32, output: *mut *const CoreA
     output.write(&API);
     OK
 }
-pub const QUERY: Query = astra_emu_query;
+pub const QUERY: Query = shinki_emu_query;
 type Failure = (Status, String);
 fn fail(status: Status, message: impl Into<String>) -> Failure {
     (status, message.into())

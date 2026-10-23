@@ -251,30 +251,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "astra-emu-abi"
-version = "0.1.0"
-source = "git+https://github.com/2018wzh/AstraEngine.git?rev=6d9d691dcc8f3d768e40b5be1d6f37366cca62d8#6d9d691dcc8f3d768e40b5be1d6f37366cca62d8"
-dependencies = [
- "tracing",
- "tracing-log",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "astra-emu-sena-rs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "astra-emu-abi",
- "log",
- "pal-asset",
- "pal-vm",
- "pollster 0.4.0",
- "wgpu 29.0.3",
- "winit 0.30.13",
-]
-
-[[package]]
 name = "atomic-arena"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1437,6 +1413,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
 name = "jiff"
 version = "0.2.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1576,7 +1558,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 [[package]]
 name = "kira"
 version = "0.12.1"
-source = "git+https://github.com/2018wzh/kira.git?rev=523790dbb7ddea5ca432f375a9f3180923f2ea1e#523790dbb7ddea5ca432f375a9f3180923f2ea1e"
+source = "git+https://github.com/Project-Shinkirou/kira.git?rev=523790dbb7ddea5ca432f375a9f3180923f2ea1e#523790dbb7ddea5ca432f375a9f3180923f2ea1e"
 dependencies = [
  "atomic-arena",
  "cpal 0.17.1",
@@ -2282,6 +2264,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "object"
+version = "0.37.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "oboe"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2879,12 +2870,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.154"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shinki-emu-abi"
+version = "0.1.0"
+source = "git+https://github.com/Project-Shinkirou/ShinkiEMU?rev=035155c78761768bc088169a4eca982f82e9d577#035155c78761768bc088169a4eca982f82e9d577"
+dependencies = [
+ "tracing",
+ "tracing-log",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "shinki-emu-build"
+version = "0.1.0"
+source = "git+https://github.com/Project-Shinkirou/ShinkiEMU?rev=035155c78761768bc088169a4eca982f82e9d577#035155c78761768bc088169a4eca982f82e9d577"
+dependencies = [
+ "anyhow",
+ "cc",
+ "object",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "shinki-emu-sena-rs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "pal-asset",
+ "pal-vm",
+ "pollster 0.4.0",
+ "shinki-emu-abi",
+ "shinki-emu-build",
+ "wgpu 29.0.3",
+ "winit 0.30.13",
 ]
 
 [[package]]
@@ -4616,3 +4657,9 @@ dependencies = [
  "quote",
  "syn 2.0.117",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"

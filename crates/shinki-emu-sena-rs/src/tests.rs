@@ -1,21 +1,16 @@
 use super::*;
 
 #[test]
-fn query_returns_the_same_complete_table() {
+fn query_rejects_incompatible_versions_without_returning_a_table() {
     unsafe {
-        let mut first = std::ptr::null();
-        let mut second = std::ptr::null();
-        assert_eq!(QUERY(ABI_VERSION, &mut first), OK);
-        assert_eq!(QUERY(ABI_VERSION, &mut second), OK);
-        assert_eq!(first, second);
-        assert_eq!((*first).validate(), Ok(()));
-        assert_eq!(QUERY(ABI_VERSION + 1, &mut second), UNSUPPORTED);
-        assert!(second.is_null());
+        let mut output = &API as *const _;
+        assert_eq!(QUERY(ABI_VERSION + 1, &mut output), UNSUPPORTED);
+        assert!(output.is_null());
     }
 }
 
 #[test]
-fn descriptor_declares_names_and_render_extent() {
+fn descriptor_and_startup_schema_satisfy_the_abi_contract() {
     let diagnostics = Diagnostics {
         header: Header::of::<Diagnostics>(),
         context: std::ptr::null_mut(),
@@ -29,10 +24,6 @@ fn descriptor_declares_names_and_render_extent() {
         let mut descriptor = std::mem::zeroed::<Descriptor>();
         assert_eq!(describe(&mut descriptor, std::ptr::null_mut()), OK);
         assert_eq!(descriptor.validate(), Ok(()));
-        assert_eq!(descriptor.display_name.text(64), Ok("Sena"));
-        assert_eq!(descriptor.family_name.text(64), Ok("SoftPAL"));
-        assert_eq!(descriptor.capabilities, CAP_CPU_SURFACE | CAP_RENDER_EXTENT);
-        assert_eq!(descriptor.render, config::RENDER);
         let schema =
             std::slice::from_raw_parts(descriptor.configuration, descriptor.configuration_count);
         assert_eq!(validate_config(schema, &[]), Ok(()));

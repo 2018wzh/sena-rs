@@ -1,5 +1,5 @@
 use crate::session::Shared;
-use astra_emu_abi::*;
+use shinki_emu_abi::*;
 use pal_vm::{Engine, PalWindowRequest};
 use std::sync::atomic::Ordering;
 

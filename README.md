@@ -50,12 +50,12 @@ do not require an earlier in-session savepoint or retain an outgoing scene.
 Platform owners drain `system_state_mut().take_window_requests()` and confirm actual
 geometry with `confirm_window_geometry`; this never changes the renderer size.
 
-## Astra Embedded
+## Shinki Embedded
 
-The `astra` branch is one adaptation commit on fork commit
+The `shinki` branch builds on fork commit
 `5fd1a8e37600fb917e053f633671560df9ca42a7`, which is upstream
 `37ab17558e0c7d26ebfb1dccfa981ba529a6630b` plus generic offscreen/lifetime and save
-fixes. It adds `crates/astra-emu-sena-rs`, a thin C ABI adapter for **Koikake**, not a
+fixes. It adds `crates/shinki-emu-sena-rs`, a thin C ABI adapter for **Koikake**, not a
 general SoftPAL compatibility claim. The original MPL-2.0 source and history remain intact.
 
 The descriptor identifies the engine as `family_id = "softpal"` (shown as `SoftPAL`) and
@@ -63,18 +63,29 @@ this emulator as `plugin_id = "sena-rs"`, the upstream repository name (shown as
 SoftPAL emulator may coexist under its own plugin ID. This does not expand Sena's
 supported-title range or change its native save identity.
 
-Build from this standalone fork or AstraEngine's native checkout. The shared ABI
-is pinned to Git revision `6d9d691dcc8f3d768e40b5be1d6f37366cca62d8` (C ABI 3); no host directory
-layout is required. Kira 0.12.1 is pinned to
+Build from this standalone fork with Rust 1.92 or newer and MSVC build tools.
+The ABI and host-side build helper use
+`Project-Shinkirou/ShinkiEMU@cb8d9dd22d7d0ab129085b324c94d6dc81fa19e3`
+(C ABI 3), with no adjacent host checkout required. Kira 0.12.1 is pinned to
 `523790dbb7ddea5ca432f375a9f3180923f2ea1e` with explicit native CPAL worker shutdown:
 
 ```bash
-cargo build --release -p astra-emu-sena-rs --features diagnostic-bridge
-cargo test -p astra-emu-sena-rs --lib
+cargo build --locked --release --target x86_64-pc-windows-msvc -p shinki-emu-sena-rs --features diagnostic-bridge
+cargo test --locked -p shinki-emu-sena-rs --lib
 ```
 
-Dynamic loading exports `astra_emu_query` and installs the shared diagnostics bridge.
-Static linking uses `astra_emu_sena_rs::QUERY` without `diagnostic-bridge`, reusing the
+`build.rs` records the actual target/profile and `LICENSE-MPL-2.0` in
+`OUT_DIR/core-build.json`; Cargo produces `shinki_emu_sena_rs.dll`.
+The embedded adapter currently supports Windows x64 MSVC. Game archives and
+release-specific fonts come from the user's game tree; the upstream
+`pal-vm/src/default.ttf` fallback is embedded into the library, not a separate
+core Resource. Its SFNT metadata identifies Microsoft-supplied MS PGothic
+(Ricoh/RYOBI) with restricted-use terms. Redistribution of the binary and that
+font in corresponding source requires permission or a licensed replacement;
+the MPL text alone does not close this asset's distribution rights.
+
+Dynamic loading exports `shinki_emu_query` and installs the shared diagnostics bridge.
+Static linking uses `shinki_emu_sena_rs::QUERY` without `diagnostic-bridge`, reusing the
 host logger. The Manager owns the sole window/event loop and Present. A dedicated
 native worker retains Sena's 16ms PAL cadence, original VM, game UI, Kira audio,
 movie decoders and native save menus. It renders the complete native wgpu scene

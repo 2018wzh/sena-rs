@@ -1,4 +1,4 @@
-use astra_emu_abi::*;
+use shinki_emu_abi::*;
 use pal_vm::TextLang;
 use std::path::{Path, PathBuf};
 

@@ -1,5 +1,5 @@
 use crate::config::{self, Settings};
-use astra_emu_abi::*;
+use shinki_emu_abi::*;
 use pal_vm::{Engine, EngineConfig, PalEvent, RuntimeStatus};
 use std::{
     collections::VecDeque,

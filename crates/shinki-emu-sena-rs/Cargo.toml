@@ -1,0 +1,27 @@
+[package]
+name = "shinki-emu-sena-rs"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version = "1.92"
+build = "build.rs"
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[features]
+default = []
+diagnostic-bridge = ["shinki-emu-abi/diagnostic-bridge"]
+
+[dependencies]
+shinki-emu-abi = { git = "https://github.com/Project-Shinkirou/ShinkiEMU", rev = "035155c78761768bc088169a4eca982f82e9d577" }
+pal-vm.workspace = true
+pal-asset.workspace = true
+anyhow.workspace = true
+pollster.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+log.workspace = true
+
+[build-dependencies]
+shinki-emu-build = { git = "https://github.com/Project-Shinkirou/ShinkiEMU", rev = "035155c78761768bc088169a4eca982f82e9d577" }
