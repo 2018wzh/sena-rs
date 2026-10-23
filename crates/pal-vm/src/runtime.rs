@@ -4111,6 +4111,8 @@ impl ScriptRuntime {
         self.argument_stack = main_argument_stack;
         self.argument_base = main_argument_base;
         self.call_stack = main_call_stack;
+        // A worker `end` set Halted only to stop itself; the game ends only
+        // when the main flow halts.
         self.status = main_status;
         Ok(())
     }
@@ -4213,6 +4215,8 @@ impl ScriptRuntime {
             }
             21 => {
                 self.vm_trace(format_args!("  op halt next_pc=0x{:08X}", self.pc));
+                // Whole-game end only in the main context; run_thread_slice
+                // restores the main status after a worker halts.
                 self.status = RuntimeStatus::Halted { pc: self.pc };
                 return Ok(StepResult::Blocked);
             }
@@ -18046,6 +18050,10 @@ fn read_text_record_string(bytes: &[u8], offset: usize, nls: Nls, multilingual: 
 /// Used by the FHD text layout, whose records are UTF-16LE; the original
 /// single-byte layout would stop at the high byte of the first character.
 fn read_utf16_c_string(bytes: &[u8], offset: usize) -> Option<String> {
+    read_utf16_c_string_with_end(bytes, offset).map(|(text, _)| text)
+}
+
+fn read_utf16_c_string_with_end(bytes: &[u8], offset: usize) -> Option<(String, Option<usize>)> {
     if offset >= bytes.len() {
         return None;
     }
@@ -18054,12 +18062,47 @@ fn read_utf16_c_string(bytes: &[u8], offset: usize) -> Option<String> {
     while position + 2 <= bytes.len() {
         let unit = u16::from_le_bytes([bytes[position], bytes[position + 1]]);
         if unit == 0 {
-            break;
+            return Some((String::from_utf16_lossy(&units), Some(position + 2)));
         }
         units.push(unit);
         position += 2;
     }
-    Some(String::from_utf16_lossy(&units))
+    Some((String::from_utf16_lossy(&units), None))
+}
+
+/// Inspect native multilingual records and the corresponding boot font without
+/// constructing a runtime, executing code, initializing devices, or writing.
+pub fn visit_multilingual_text_data(
+    bytes: &[u8],
+    lang: TextLang,
+    root: &Path,
+    mut visit: impl FnMut(u32, &str, &str),
+) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(
+        crate::assets::multilingual_text_table(bytes),
+        "text_data_not_multilingual"
+    );
+    let face = pick_face_for(&game_font_faces(Some(root), None), lang, None)
+        .ok_or_else(|| anyhow::anyhow!("text_data_no_native_face"))?;
+    let mut position = 16usize;
+    let mut previous_id: Option<u32> = None;
+    while position < bytes.len() {
+        let end = position.checked_add(4)
+            .ok_or_else(|| anyhow::anyhow!("text_data_offset_overflow"))?;
+        let header = bytes.get(position..end)
+            .ok_or_else(|| anyhow::anyhow!("text_data_truncated_id"))?;
+        let id = u32::from_le_bytes(header.try_into().expect("4-byte slice"));
+        if let Some(previous) = previous_id {
+            anyhow::ensure!(previous.checked_add(1) == Some(id), "text_data_nonconsecutive_id");
+        }
+        previous_id = Some(id);
+        let (raw, end) = read_utf16_c_string_with_end(bytes, end)
+            .ok_or_else(|| anyhow::anyhow!("text_data_missing_record"))?;
+        position = end.ok_or_else(|| anyhow::anyhow!("text_data_unterminated_record"))?;
+        let selected = select_text_field(raw.clone(), lang, true);
+        visit(id, &raw, &selected);
+    }
+    Ok(face)
 }
 
 /// Pick this language's field out of a multi-language text record.
@@ -18674,6 +18717,7 @@ enum StepResult {
 mod tests {
     use super::*;
     use crate::audio::AudioConfig;
+    use pal_script::SCRIPT_CODE_BASE;
 
     #[test]
     fn chinese_text_language_selects_the_face_tagged_for_it() {
@@ -19182,6 +19226,114 @@ mod tests {
             graphic_index: None,
         };
         (assets, points)
+    }
+
+    /// Asset set running `body` from `SCRIPT_CODE_BASE`; `point_offsets` is
+    /// Point.dat in file order (point id 1 is the last entry).
+    fn script_core_assets(body: &[u8], point_offsets: &[u32]) -> CoreAssets {
+        let asset = |name: &str, bytes: Vec<u8>| LoadedAsset {
+            name: name.to_owned(),
+            bytes,
+            source: AssetSource::Loose {
+                path: PathBuf::from(name),
+            },
+        };
+        let mut script = b"Sv20".to_vec();
+        script.extend_from_slice(&0u32.to_le_bytes());
+        script.extend_from_slice(&SCRIPT_CODE_BASE.to_le_bytes());
+        script.extend_from_slice(body);
+        let point_dat: Vec<u8> = point_offsets.iter().flat_map(|o| o.to_le_bytes()).collect();
+        CoreAssets {
+            script: asset("Script.src", script),
+            file_dat: asset("File.dat", Vec::new()),
+            text_dat: asset("Text.dat", Vec::new()),
+            mem_dat: asset("Mem.dat", Vec::new()),
+            point_table: PointTable::parse(&point_dat).unwrap(),
+            point_dat: asset("Point.dat", point_dat),
+            graphic_dat: None,
+            text_dat_multilingual: false,
+            file_dat_layout: FileDatLayout::default(),
+            script_check_value: 0,
+            script_entry_pc: SCRIPT_CODE_BASE,
+            extended_softpal: false,
+            graphic_index: None,
+        }
+    }
+
+    fn script_words(words: &[u32]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    const OP_PUSH: u32 = 0x0001_0000 | 31;
+    const OP_EXTCALL: u32 = 0x0001_0000 | 23;
+    const OP_JMP: u32 = 0x0001_0000 | 9;
+    const OP_END: u32 = 0x0001_0000 | 21;
+
+    /// `end` in the main flow (the exit routine's last opcode) ends the game.
+    #[test]
+    fn main_flow_end_halts_the_game() {
+        let assets = script_core_assets(&script_words(&[OP_END]), &[0]);
+        let config = ScriptRuntimeConfig::default();
+        let mut runtime = ScriptRuntime::boot(SCRIPT_CODE_BASE, config.clone());
+        let tick = runtime.run_frame(&assets, &config).unwrap();
+        assert!(
+            matches!(tick.status, RuntimeStatus::Halted { .. }),
+            "{:?}",
+            tick.status
+        );
+    }
+
+    /// `end` inside a `create_thread` worker stops only that worker; the main
+    /// flow keeps running.
+    #[test]
+    fn thread_end_does_not_halt_the_game() {
+        // 12: push 2; 20: create_thread(point 2); 32: jmp point 1 (self); 40: end
+        let body = script_words(&[OP_PUSH, 2, OP_EXTCALL, 21 << 16, 0, OP_JMP, 1, OP_END]);
+        // Point id 2 -> entry 0 (pc 40), id 1 -> entry 1 (pc 32).
+        let assets = script_core_assets(&body, &[40 - SCRIPT_CODE_BASE, 32 - SCRIPT_CODE_BASE]);
+        let config = ScriptRuntimeConfig::default();
+        let mut runtime = ScriptRuntime::boot(SCRIPT_CODE_BASE, config.clone());
+
+        let tick = runtime.run_frame(&assets, &config).unwrap();
+        assert!(
+            matches!(tick.status, RuntimeStatus::Running { .. }),
+            "{:?}",
+            tick.status
+        );
+        assert_eq!(runtime.thread_state.running, 1);
+        assert_eq!(runtime.thread_state.target_pc, Some(40));
+
+        // Run the worker slice alone: the main flow's next step rewrites
+        // Running and would hide a leaked Halted.
+        let script = assets.script_image().unwrap();
+        runtime
+            .run_thread_slice(
+                &script,
+                &assets.point_table,
+                &assets.mem_dat.bytes,
+                &assets,
+                None,
+                None,
+                None,
+                None,
+                None,
+                64,
+            )
+            .unwrap();
+        assert!(
+            matches!(runtime.status, RuntimeStatus::Running { .. }),
+            "{:?}",
+            runtime.status
+        );
+        assert_eq!(runtime.thread_state.running, 0);
+        assert_eq!(runtime.thread_state.target_pc, None);
+
+        let tick = runtime.run_frame(&assets, &config).unwrap();
+        assert!(
+            matches!(tick.status, RuntimeStatus::Running { .. }),
+            "{:?}",
+            tick.status
+        );
     }
 
     #[test]
